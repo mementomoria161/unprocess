@@ -35,17 +35,21 @@ class AutoFitSurfaceView @JvmOverloads constructor(
     private var aspectRatio = 0f
 
     /**
-     * Sets the aspect ratio for this view. The size of the view will be
-     * measured based on the ratio calculated from the parameters.
-     *
-     * @param width  Camera resolution horizontal size
-     * @param height Camera resolution vertical size
+     * Sets the aspect ratio used to size this view in its parent. The caller
+     * must pass the dimensions as seen on the display (i.e. already swapped if
+     * the camera frames will be rotated 90/270 degrees to match the display).
+     * Buffer size for the surface is configured separately via [setBufferSize].
      */
     fun setAspectRatio(width: Int, height: Int) {
         require(width > 0 && height > 0) { "Size cannot be negative" }
         aspectRatio = width.toFloat() / height.toFloat()
-        holder.setFixedSize(width, height)
         requestLayout()
+    }
+
+    /** Sets the fixed buffer size used by the underlying surface (sensor coordinates). */
+    fun setBufferSize(width: Int, height: Int) {
+        require(width > 0 && height > 0) { "Size cannot be negative" }
+        holder.setFixedSize(width, height)
     }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -55,20 +59,18 @@ class AutoFitSurfaceView @JvmOverloads constructor(
         if (aspectRatio == 0f) {
             setMeasuredDimension(width, height)
         } else {
-
-            // Performs center-crop transformation of the camera frames
+            // Center-fit using the provided (display-oriented) aspect ratio.
             val newWidth: Int
             val newHeight: Int
-            val actualRatio = if (width > height) aspectRatio else 1f / aspectRatio
-            if (width > height * actualRatio) {
+            if (width > height * aspectRatio) {
                 newHeight = height
-                newWidth = (height * actualRatio).roundToInt()
+                newWidth = (height * aspectRatio).roundToInt()
             } else {
                 newWidth = width
-                newHeight = (width / actualRatio).roundToInt()
+                newHeight = (width / aspectRatio).roundToInt()
             }
 
-            Log.d(TAG, "Measured dimensions set: $newWidth x $newHeight (aspectRatio=$aspectRatio, actualRatio=$actualRatio)")
+            Log.d(TAG, "Measured dimensions set: $newWidth x $newHeight (aspectRatio=$aspectRatio)")
             setMeasuredDimension(newWidth, newHeight)
         }
     }

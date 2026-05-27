@@ -17,6 +17,7 @@
 <androidx.constraintlayout.widget.ConstraintLayout
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:padding="16dp"
@@ -86,11 +87,39 @@
             android:layout_height="match_parent"
             android:layout_gravity="center" />
 
+        <!-- Shutter-flash overlay (briefly opaque black at the moment of exposure). -->
         <View
             android:id="@+id/overlay"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:foreground="@android:color/transparent" />
+            android:background="@android:color/transparent" />
+
+        <!-- Capture overlay. Two states:
+             - SAVING: just a semi-transparent dim over the live preview
+               (no spinner, no text — minimal visual noise).
+             - DONE: same dim PLUS the just-saved photo shown fitCenter at
+               the preview's full size. Dismissed by the capture button,
+               whose text switches to "Take new" while this overlay is in
+               its DONE state. Clickable=true so taps on the preview area
+               can't reach the underlying surface while we're showing it. -->
+        <FrameLayout
+            android:id="@+id/capture_progress_overlay"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:background="#80000000"
+            android:clickable="true"
+            android:focusable="true"
+            android:visibility="gone">
+
+            <ImageView
+                android:id="@+id/capture_progress_thumbnail"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:contentDescription="@string/progress_thumbnail_desc"
+                android:scaleType="fitCenter"
+                android:visibility="gone" />
+
+        </FrameLayout>
 
     </com.google.android.material.card.MaterialCardView>
 

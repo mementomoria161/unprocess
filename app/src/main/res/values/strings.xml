@@ -16,4 +16,7 @@
 <resources>
     <string name="app_name">unprocess</string>
     <string name="capture">Capture</string>
+    <!-- Capture overlay (shown after a successful capture). -->
+    <string name="progress_take_new">Take new</string>
+    <string name="progress_thumbnail_desc">Preview of the saved image</string>
 </resources>
