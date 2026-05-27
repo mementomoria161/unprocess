@@ -19,11 +19,14 @@ package com.reilandeubank.unprocess
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.View
 import android.view.WindowManager
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
+import androidx.navigation.fragment.NavHostFragment
 import com.reilandeubank.unprocess.databinding.ActivityCameraBinding
+import com.reilandeubank.unprocess.fragments.CameraFragment
 
 class CameraActivity : AppCompatActivity() {
 
@@ -45,12 +48,22 @@ class CameraActivity : AppCompatActivity() {
         setContentView(activityCameraBinding.root)
     }
 
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+            val navHost = supportFragmentManager.findFragmentById(R.id.fragment_container) as? NavHostFragment
+            val cameraFragment = navHost?.childFragmentManager?.primaryNavigationFragment as? CameraFragment
+            cameraFragment?.triggerCapture()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
     override fun onResume() {
         super.onResume()
         // Before setting full screen flags, we must wait a bit to let UI settle; otherwise, we may
         // be trying to set app to immersive mode before it's ready and the flags do not stick
-        activityCameraBinding.fragmentContainer.postDelayed({
-            activityCameraBinding.fragmentContainer.systemUiVisibility = FLAGS_FULLSCREEN
+        activityCameraBinding.root.postDelayed({
+            activityCameraBinding.root.systemUiVisibility = FLAGS_FULLSCREEN
         }, IMMERSIVE_FLAG_TIMEOUT)
     }
 

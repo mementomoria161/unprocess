@@ -36,6 +36,8 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.HandlerThread
 import android.widget.Toast
+import android.content.res.ColorStateList
+import android.view.HapticFeedbackConstants
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.Surface
@@ -97,6 +99,12 @@ class CameraFragment : Fragment() {
     private val characteristics: CameraCharacteristics
         get() = cameraManager.getCameraCharacteristics(currentCameraId)
 
+    private val parentCharacteristics: CameraCharacteristics
+        get() {
+            val parentId = physicalToLogicalMap[currentCameraId] ?: currentCameraId
+            return cameraManager.getCameraCharacteristics(parentId)
+        }
+
     /** Readers used as buffers for camera still shots */
     private lateinit var imageReader: ImageReader
 
@@ -151,6 +159,14 @@ class CameraFragment : Fragment() {
     private var flashMode: Int = CaptureRequest.CONTROL_AE_MODE_ON
     private var isSquare: Boolean = false
 
+    private val prefs by lazy { requireContext().getSharedPreferences("purecam_settings", Context.MODE_PRIVATE) }
+    private var isSettingsMode = false
+    private var isAspectEnabled = true
+    private var isFlashEnabled = true
+    private var isFormatEnabled = true
+
+    private val physicalToLogicalMap = HashMap<String, String>()
+
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
@@ -165,50 +181,78 @@ class CameraFragment : Fragment() {
         super.onViewCreated(view, savedInstanceState)
         currentCameraId = args.cameraId
         isJpeg = args.convertToJpeg
+
+        // Load toolbar settings configuration
+        isAspectEnabled = prefs.getBoolean("aspect_enabled", true)
+        isFlashEnabled = prefs.getBoolean("flash_enabled", true)
+        isFormatEnabled = prefs.getBoolean("format_enabled", true)
+
+        updateViewfinderRatio()
         updateModeToggleUI()
         updateFlashUI()
         updateAspectRatioUI()
+        updateSettingsUI()
         setupLensSelector()
 
         fragmentCameraBinding.modeToggle?.setOnClickListener {
-            isJpeg = !isJpeg
-            updateModeToggleUI()
-            // The capture format is always RAW_SENSOR — only the save path
-            // differs (DNG vs DNG→Bitmap→JPEG). No need to restart the session.
+            if (isSettingsMode) {
+                isFormatEnabled = !isFormatEnabled
+                updateSettingsUI()
+            } else {
+                isJpeg = !isJpeg
+                updateModeToggleUI()
+                // The capture format is always RAW_SENSOR — only the save path
+                // differs (DNG vs DNG→Bitmap→JPEG). No need to restart the session.
+            }
         }
 
         fragmentCameraBinding.aspectRatioToggle?.setOnClickListener {
-            isSquare = !isSquare
-            updateAspectRatioUI()
-            if (!isShowingDone) {
-                initializeCamera()
+            if (isSettingsMode) {
+                isAspectEnabled = !isAspectEnabled
+                updateSettingsUI()
+            } else {
+                isSquare = !isSquare
+                updateAspectRatioUI()
+                updateViewfinderRatio()
+                if (!isShowingDone) {
+                    initializeCamera()
+                }
             }
         }
 
         fragmentCameraBinding.flashToggle?.setOnClickListener {
-            flashMode = if (flashMode == CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH) {
-                CaptureRequest.CONTROL_AE_MODE_ON
+            if (isSettingsMode) {
+                isFlashEnabled = !isFlashEnabled
+                updateSettingsUI()
             } else {
-                CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
-            }
-            updateFlashUI()
-            
-            // Try to update the existing session if possible
-            try {
-                if (::session.isInitialized) {
-                        val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                            addTarget(fragmentCameraBinding.viewFinder.holder.surface)
-                            set(CaptureRequest.CONTROL_AE_MODE, flashMode)
-                            // We don't use TORCH for standard flash toggle, common camera apps use strobe
-                        }
-                    session.setRepeatingRequest(captureRequest.build(), null, cameraHandler)
+                flashMode = if (flashMode == CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH) {
+                    CaptureRequest.CONTROL_AE_MODE_ON
                 } else {
+                    CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
+                }
+                updateFlashUI()
+                
+                // Try to update the existing session if possible
+                try {
+                    if (::session.isInitialized) {
+                            val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
+                                addTarget(fragmentCameraBinding.viewFinder.holder.surface)
+                                set(CaptureRequest.CONTROL_AE_MODE, flashMode)
+                                // We don't use TORCH for standard flash toggle, common camera apps use strobe
+                            }
+                        session.setRepeatingRequest(captureRequest.build(), null, cameraHandler)
+                    } else {
+                        initializeCamera()
+                    }
+                } catch (exc: Exception) {
+                    Log.e(TAG, "Failed to update flash mode on existing session, re-initializing", exc)
                     initializeCamera()
                 }
-            } catch (exc: Exception) {
-                Log.e(TAG, "Failed to update flash mode on existing session, re-initializing", exc)
-                initializeCamera()
             }
+        }
+
+        fragmentCameraBinding.settingsToggle?.setOnClickListener {
+            toggleSettingsMode()
         }
 
         val navOffsetListener = androidx.core.view.OnApplyWindowInsetsListener { v, insets ->
@@ -250,12 +294,18 @@ class CameraFragment : Fragment() {
                 height: Int
             ) = Unit
             override fun surfaceCreated(holder: SurfaceHolder) {
-                // To ensure that size is set, initialize camera in the view's thread if not reviewing
-                view.post {
-                    if (!isShowingDone) {
+                // Wait for layout to settle before initializing camera to prevent stretching
+                view.postDelayed({
+                    if (_fragmentCameraBinding != null && isAdded && !isShowingDone) {
                         initializeCamera()
+                        // Run it a second time after a short delay to ensure surface sizes are fully applied
+                        view.postDelayed({
+                            if (_fragmentCameraBinding != null && isAdded && !isShowingDone) {
+                                initializeCamera()
+                            }
+                        }, 300L)
                     }
-                }
+                }, 250L)
             }
         })
 
@@ -302,37 +352,38 @@ class CameraFragment : Fragment() {
         container?.removeAllViews()
 
         val cameraIdList = cameraManager.cameraIdList
-        val openableIds: Set<String> = cameraIdList.toSet()
         Log.d(TAG, "Lens selector — cameras found: ${cameraIdList.joinToString()}")
 
         // Expand logical BACK cameras into their physical children where
         // possible (so the user gets per-focal-length buttons on multi-lens
-        // back setups). Falls back to the logical ID if none of the physical
-        // children can be opened directly.
+        // back setups).
         //
         // FRONT cameras are intentionally NOT expanded — opening a physical
         // sub-camera of a logical front camera (e.g. on Pixel) bypasses the
-        // system's tuned preview pipeline. The physical child's
-        // SENSOR_ORIENTATION / active-array often differs from the logical
-        // wrapper, which makes our rotation/aspect-ratio math wrong and shows
-        // up as a squished selfie preview. The logical camera always works.
+        // system's tuned preview pipeline.
+        physicalToLogicalMap.clear()
         val expandedIds = LinkedHashSet<String>()
         for (id in cameraIdList) {
             val ch = cameraManager.getCameraCharacteristics(id)
-            val isFront = ch.get(CameraCharacteristics.LENS_FACING) ==
-                    CameraCharacteristics.LENS_FACING_FRONT
+            val facing = ch.get(CameraCharacteristics.LENS_FACING)
+            val isFront = facing == CameraCharacteristics.LENS_FACING_FRONT
             val physicalIds = if (!isFront && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 ch.physicalCameraIds
             } else emptySet()
-            val openablePhysicals = physicalIds.filter { it in openableIds }
-            if (openablePhysicals.isNotEmpty()) expandedIds.addAll(openablePhysicals)
-            else expandedIds.add(id)
+            
+            for (pid in physicalIds) {
+                physicalToLogicalMap[pid] = id
+            }
+            
+            if (physicalIds.isNotEmpty()) {
+                expandedIds.addAll(physicalIds)
+            } else {
+                expandedIds.add(id)
+            }
         }
 
         // Drop any logical BACK camera whose physical children we already
-        // included — keeps the selector free of duplicates that would all
-        // open the same physical sensor. Front logical cameras are kept
-        // unconditionally (we never expanded them).
+        // included — keeps the selector free of duplicates.
         val filteredIds = expandedIds.filter { id ->
             val ch = cameraManager.getCameraCharacteristics(id)
             val isFront = ch.get(CameraCharacteristics.LENS_FACING) ==
@@ -344,21 +395,57 @@ class CameraFragment : Fragment() {
             children.isEmpty() || children.none { it in expandedIds }
         }
 
-        // Build labels (focal-length buckets for back cams, "F" for front cams).
+        // Build list of raw entries with characteristics
+        val rawEntries = filteredIds.map { id ->
+            val ch = cameraManager.getCameraCharacteristics(id)
+            val focal = ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 0f
+            val facing = ch.get(CameraCharacteristics.LENS_FACING) ?: CameraCharacteristics.LENS_FACING_BACK
+            Triple(id, focal, facing)
+        }
+
+        // Sort: Front facing first (priority 0), then Back facing (priority 1).
+        // Within each category, sort by focal length ascending.
+        val sortedEntries = rawEntries.sortedWith(compareBy<Triple<String, Float, Int>> {
+            if (it.third == CameraCharacteristics.LENS_FACING_FRONT) 0 else 1
+        }.thenBy { it.second })
+
+        // Check if there are multiple front cameras
+        val frontCount = sortedEntries.count { it.third == CameraCharacteristics.LENS_FACING_FRONT }
+
         val usedLabels = HashSet<String>()
-        val entries = filteredIds
-            .map { id ->
-                val ch = cameraManager.getCameraCharacteristics(id)
-                val focal = ch.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                    ?.firstOrNull() ?: 0f
-                Triple(id, focal, ch.get(CameraCharacteristics.LENS_FACING))
+        val entries = sortedEntries.map { (id, focal, facing) ->
+            val ch = cameraManager.getCameraCharacteristics(id)
+            val mainIdForFacing = if (facing == CameraCharacteristics.LENS_FACING_FRONT) "1" else "0"
+            val (mainFocal, mainActiveWidth) = try {
+                val mainCh = cameraManager.getCameraCharacteristics(mainIdForFacing)
+                val f = mainCh.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)?.firstOrNull() ?: 4.3f
+                val activeRect = mainCh.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)
+                val width = activeRect?.width()?.toFloat() ?: 1f
+                Pair(f, width)
+            } catch (e: Exception) {
+                Pair(4.3f, 1f)
             }
-            .sortedBy { it.second }
-            .map { (id, focal, facing) ->
-                val base = if (facing == CameraCharacteristics.LENS_FACING_FRONT) "F" else labelForFocalLength(focal, id)
-                val label = if (usedLabels.add(base)) base else "$base ($id)".also { usedLabels.add(it) }
-                LensEntry(id, focal, label)
+
+            val currentActiveWidth = ch.get(CameraCharacteristics.SENSOR_INFO_ACTIVE_ARRAY_SIZE)?.width()?.toFloat() ?: 1f
+            
+            // Calculate total effective zoom (optical * digital sensor crop)
+            val opticalZoom = if (focal > 0f && mainFocal > 0f) focal / mainFocal else 1f
+            val cropZoom = if (mainActiveWidth > 1f && currentActiveWidth > 1f) mainActiveWidth / currentActiveWidth else 1f
+            val effectiveZoom = opticalZoom * cropZoom
+
+            val base = if (facing == CameraCharacteristics.LENS_FACING_FRONT) {
+                if (frontCount > 1) {
+                    "F (${labelForZoom(effectiveZoom)})"
+                } else {
+                    "F"
+                }
+            } else {
+                labelForZoom(effectiveZoom)
             }
+
+            val label = if (usedLabels.add(base)) base else "$base ($id)".also { usedLabels.add(it) }
+            LensEntry(id, focal, label)
+        }
 
         allCameraIds = entries.map { it.id }
         Log.d(TAG, "Lens selector — final entries: $entries")
@@ -387,7 +474,10 @@ class CameraFragment : Fragment() {
                 cornerRadius = 22.dpToPx()
                 strokeWidth = 0
                 setOnClickListener {
-                    if (currentCameraId != entry.id) switchCamera(entry.id)
+                    if (currentCameraId != entry.id) {
+                        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                        switchCamera(entry.id)
+                    }
                 }
             }
             container?.addView(button)
@@ -395,16 +485,111 @@ class CameraFragment : Fragment() {
         updateLensHighlight()
     }
 
-    /** Buckets focal length (mm) into the familiar "0.5x / 1x / 2x" labels. */
-    private fun labelForFocalLength(focal: Float, cameraId: String): String = when {
-        focal == 0f -> "CAM $cameraId"
-        focal < 2.5f -> "0.5x"
-        focal < 3.5f -> "0.6x"
-        focal < 9f -> "1x"
-        focal < 12f -> "2x"
-        focal < 20f -> "3x"
-        focal < 30f -> "5x"
-        else -> "${(focal / 4.3f).toInt()}x"
+    /** Dynamically calculates zoom factor label. */
+    private fun labelForZoom(zoom: Float): String {
+        val formatted = String.format(Locale.US, "%.1f", zoom)
+        return if (formatted.endsWith(".0")) {
+            formatted.substringBefore(".0") + "x"
+        } else {
+            "${formatted}x"
+        }
+    }
+
+    fun triggerCapture() {
+        val button = _fragmentCameraBinding?.captureButton ?: return
+        if (button.isEnabled) {
+            button.performClick()
+        }
+    }
+
+    private fun toggleSettingsMode() {
+        isSettingsMode = !isSettingsMode
+        if (!isSettingsMode) {
+            // Save state when exiting settings mode
+            prefs.edit().apply {
+                putBoolean("aspect_enabled", isAspectEnabled)
+                putBoolean("flash_enabled", isFlashEnabled)
+                putBoolean("format_enabled", isFormatEnabled)
+                apply()
+            }
+        }
+        updateSettingsUI()
+    }
+
+    private fun updateSettingsUI() {
+        val binding = _fragmentCameraBinding ?: return
+        
+        // Always show the standard settings gear icon
+        binding.settingsToggle?.setIconResource(R.drawable.ic_settings)
+        
+        // Settings gear button is highlighted (active) when settings mode is OFF (inactive),
+        // and grayed out (inactive) when settings mode is ON (active)
+        binding.settingsToggle?.let { setButtonActiveStyle(it, !isSettingsMode) }
+        
+        if (isSettingsMode) {
+            // Show all buttons inside settings mode
+            binding.aspectRatioToggle?.visibility = View.VISIBLE
+            binding.flashToggle?.visibility = View.VISIBLE
+            binding.modeToggle?.visibility = View.VISIBLE
+            
+            setButtonActiveStyle(binding.aspectRatioToggle, isAspectEnabled)
+            setButtonActiveStyle(binding.flashToggle, isFlashEnabled)
+            setButtonActiveStyle(binding.modeToggle, isFormatEnabled)
+        } else {
+            // Only show enabled buttons
+            binding.aspectRatioToggle?.visibility = if (isAspectEnabled) View.VISIBLE else View.GONE
+            binding.flashToggle?.visibility = if (isFlashEnabled) View.VISIBLE else View.GONE
+            binding.modeToggle?.visibility = if (isFormatEnabled) View.VISIBLE else View.GONE
+            
+            // Highlight visible buttons with active accent color
+            setButtonActiveStyle(binding.aspectRatioToggle, isAspectEnabled)
+            setButtonActiveStyle(binding.flashToggle, isFlashEnabled)
+            setButtonActiveStyle(binding.modeToggle, isFormatEnabled)
+            
+            updateAspectRatioUI()
+            updateFlashUI()
+            updateModeToggleUI()
+        }
+    }
+
+    private fun setButtonActiveStyle(button: com.google.android.material.button.MaterialButton?, active: Boolean) {
+        if (button == null) return
+        if (active) {
+            button.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.primary))
+            button.setTextColor(Color.BLACK)
+            button.iconTint = ColorStateList.valueOf(Color.BLACK)
+        } else {
+            button.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#33FFFFFF"))
+            button.setTextColor(Color.GRAY)
+            button.iconTint = ColorStateList.valueOf(Color.GRAY)
+        }
+    }
+
+    private fun updateViewfinderRatio() {
+        try {
+            val ch = characteristics
+            val sensorOrientation = ch.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+            val streamMap = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+            if (streamMap != null) {
+                val supportedSizes = streamMap.getOutputSizes(args.pixelFormat)
+                val format = if (supportedSizes.isNullOrEmpty()) ImageFormat.JPEG else args.pixelFormat
+                val finalSizes = if (format == args.pixelFormat) supportedSizes else streamMap.getOutputSizes(format)
+                val size = finalSizes?.maxByOrNull { it.height * it.width }
+                if (size != null) {
+                    val needsSwap = (sensorOrientation == 90 || sensorOrientation == 270)
+                    val displayWidth = if (needsSwap) size.height else size.width
+                    val displayHeight = if (needsSwap) size.width else size.height
+                    val ratio = if (isSquare) "1:1" else "$displayWidth:$displayHeight"
+
+                    val constraintSet = androidx.constraintlayout.widget.ConstraintSet()
+                    constraintSet.clone(fragmentCameraBinding.root as androidx.constraintlayout.widget.ConstraintLayout)
+                    constraintSet.setDimensionRatio(R.id.view_finder_container, ratio)
+                    constraintSet.applyTo(fragmentCameraBinding.root as androidx.constraintlayout.widget.ConstraintLayout)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to update viewfinder ratio constraints", e)
+        }
     }
 
     // -------- Capture progress UI --------
@@ -563,7 +748,7 @@ class CameraFragment : Fragment() {
             val button = container.getChildAt(i) as com.google.android.material.button.MaterialButton
             val cameraId = allCameraIds.getOrNull(i)
             if (cameraId == currentCameraId) {
-                button.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.secondary)) 
+                button.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.primary)) 
                 button.setTextColor(Color.BLACK)
                 button.alpha = 1.0f
             } else {
@@ -583,6 +768,9 @@ class CameraFragment : Fragment() {
         
         // Update highlight immediately for responsive feel
         updateLensHighlight()
+
+        // Pre-apply correct viewfinder constraints to avoid stretch layout jumps
+        updateViewfinderRatio()
         
         // Cancel any pending camera operations and start fresh only if not showing done preview
         if (!isShowingDone) {
@@ -668,12 +856,25 @@ class CameraFragment : Fragment() {
             kotlinx.coroutines.delay(100)
 
             try {
-                // Open the selected camera
-                camera = openCamera(cameraManager, currentCameraId, cameraHandler)
+                // Open the logical camera parent (or the camera itself if it is logical)
+                val cameraToOpen = physicalToLogicalMap[currentCameraId] ?: currentCameraId
+                try {
+                    camera = openCamera(cameraManager, cameraToOpen, cameraHandler)
+                } catch (exc: Exception) {
+                    Log.e(TAG, "Failed to open camera $cameraToOpen, trying fallback", exc)
+                    val fallbackId = physicalToLogicalMap[currentCameraId]
+                    if (fallbackId != null && fallbackId != currentCameraId) {
+                        currentCameraId = fallbackId
+                        camera = openCamera(cameraManager, currentCameraId, cameraHandler)
+                        updateLensHighlight()
+                    } else {
+                        throw exc
+                    }
+                }
 
                 // Initialize an image reader which will be used to capture still photos
                 Log.d(TAG, "Initializing image reader")
-                val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                val streamMap = parentCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                     ?: throw RuntimeException("Camera $currentCameraId does not support stream configuration map")
                 
                 // Both "Save as RAW" and "Save as JPEG" capture RAW sensor data —
@@ -705,7 +906,7 @@ class CameraFragment : Fragment() {
                 val captureRatio = size.width.toFloat() / size.height.toFloat()
                 val previewSize = getPreviewOutputSize(
                     fragmentCameraBinding.viewFinder.display,
-                    characteristics,
+                    parentCharacteristics,
                     SurfaceHolder::class.java,
                     aspectRatio = captureRatio
                 )
@@ -749,9 +950,21 @@ class CameraFragment : Fragment() {
             // Creates list of Surfaces where the camera will output frames
             val targets = listOf(fragmentCameraBinding.viewFinder.holder.surface, imageReader.surface)
 
-            // Start a capture session using our open camera and list of Surfaces where frames will go
+            // Creates list of OutputConfigurations where the camera will output frames
+            val outputs = targets.map { surface ->
+                val config = android.hardware.camera2.params.OutputConfiguration(surface)
+                val logicalParent = physicalToLogicalMap[currentCameraId]
+                if (logicalParent != null && logicalParent != currentCameraId) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        config.setPhysicalCameraId(currentCameraId)
+                    }
+                }
+                config
+            }
+
+            // Start a capture session using our open camera and list of OutputConfigurations
             try {
-                session = createCaptureSession(camera, targets, cameraHandler)
+                session = createCaptureSession(camera, outputs, cameraHandler)
             } catch (exc: Exception) {
                 Log.e(TAG, "Failed to create capture session", exc)
                 reEnableUI()
@@ -786,6 +999,10 @@ class CameraFragment : Fragment() {
      */
     private fun handleCaptureClick(button: View) {
         if (!::session.isInitialized) return
+        
+        // Provide haptic feedback for shutter
+        button.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+
         // Disable while the save is in flight. Once the Done state lands,
         // the button is re-enabled and rebadged as "Take new" by
         // showProgress(Done) → updateCaptureButtonForState.
@@ -889,7 +1106,7 @@ class CameraFragment : Fragment() {
      */
     private suspend fun createCaptureSession(
         device: CameraDevice,
-        targets: List<Surface>,
+        outputs: List<android.hardware.camera2.params.OutputConfiguration>,
         handler: Handler,
     ): CameraCaptureSession = suspendCancellableCoroutine { cont ->
         val callback = object : CameraCaptureSession.StateCallback() {
@@ -903,7 +1120,6 @@ class CameraFragment : Fragment() {
                 if (cont.isActive) cont.resumeWithException(exc)
             }
         }
-        val outputs = targets.map { android.hardware.camera2.params.OutputConfiguration(it) }
         val executor = java.util.concurrent.Executor { command -> handler.post(command) }
         val sessionConfig = android.hardware.camera2.params.SessionConfiguration(
             android.hardware.camera2.params.SessionConfiguration.SESSION_REGULAR,
