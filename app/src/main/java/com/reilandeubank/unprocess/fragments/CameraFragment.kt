@@ -99,12 +99,6 @@ class CameraFragment : Fragment() {
     private val characteristics: CameraCharacteristics
         get() = cameraManager.getCameraCharacteristics(currentCameraId)
 
-    private val parentCharacteristics: CameraCharacteristics
-        get() {
-            val parentId = physicalToLogicalMap[currentCameraId] ?: currentCameraId
-            return cameraManager.getCameraCharacteristics(parentId)
-        }
-
     /** Readers used as buffers for camera still shots */
     private lateinit var imageReader: ImageReader
 
@@ -838,9 +832,15 @@ class CameraFragment : Fragment() {
                     }
                 }
 
-                // Initialize an image reader which will be used to capture still photos
+                // Initialize an image reader which will be used to capture still photos.
+                // Use the CURRENT sensor's characteristics — for a physical sub-camera
+                // those are the physical's, not the logical parent's. With
+                // setPhysicalCameraId() (below), the configured size must be valid
+                // for the physical sensor, otherwise session configuration silently
+                // fails on multi-sensor devices like Pixel 4a 5G where the ultrawide
+                // and main sensor have different native resolutions.
                 Log.d(TAG, "Initializing image reader")
-                val streamMap = parentCharacteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
+                val streamMap = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
                     ?: throw RuntimeException("Camera $currentCameraId does not support stream configuration map")
                 
                 // Both "Save as RAW" and "Save as JPEG" capture RAW sensor data —
@@ -872,7 +872,7 @@ class CameraFragment : Fragment() {
                 val captureRatio = size.width.toFloat() / size.height.toFloat()
                 val previewSize = getPreviewOutputSize(
                     fragmentCameraBinding.viewFinder.display,
-                    parentCharacteristics,
+                    characteristics,
                     SurfaceHolder::class.java,
                     aspectRatio = captureRatio
                 )
