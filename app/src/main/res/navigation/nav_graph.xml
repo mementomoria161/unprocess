@@ -85,11 +85,6 @@
             app:popUpTo="@id/camera_fragment"
             app:popUpToInclusive="true" />
 
-        <action
-            android:id="@+id/action_camera_to_jpeg_viewer"
-            app:destination="@id/image_viewer_fragment"
-            app:launchSingleTop="true" />
-
     </fragment>
 
     <fragment

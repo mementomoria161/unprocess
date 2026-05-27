@@ -30,7 +30,6 @@ import androidx.fragment.app.Fragment
 import androidx.lifecycle.lifecycleScope
 import androidx.navigation.fragment.navArgs
 import androidx.viewpager2.widget.ViewPager2
-import com.bumptech.glide.Glide
 import com.reilandeubank.unprocess.utils.GenericListAdapter
 import com.reilandeubank.unprocess.utils.decodeExifOrientation
 import kotlinx.coroutines.Dispatchers
@@ -79,8 +78,10 @@ class ImageViewerFragment : Fragment() {
         adapter = GenericListAdapter(
                 bitmapList,
                 itemViewFactory = { imageViewFactory() }) { view, item, _ ->
-            view as ImageView
-            Glide.with(view).load(item).into(view)
+            // The item is already a decoded Bitmap, so a direct setImageBitmap
+            // is enough — no need to pull in Glide just to copy a Bitmap into
+            // an ImageView.
+            (view as ImageView).setImageBitmap(item)
         }
     }
 
