@@ -151,7 +151,8 @@ class CameraFragment : Fragment() {
     private lateinit var relativeOrientation: OrientationLiveData
 
     private var currentCameraId: String = ""
-    private var isJpeg: Boolean = false
+    private enum class OutputFormat { RAW, JPEG, WEBP }
+    private var outputFormat: OutputFormat = OutputFormat.JPEG
     private var flashMode: Int = CaptureRequest.CONTROL_AE_MODE_ON
     private var isSquare: Boolean = false
 
@@ -175,7 +176,11 @@ class CameraFragment : Fragment() {
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
         currentCameraId = args.cameraId
-        isJpeg = args.convertToJpeg
+        outputFormat = when (args.outputFormat.uppercase()) {
+            "RAW" -> OutputFormat.RAW
+            "WEBP" -> OutputFormat.WEBP
+            else -> OutputFormat.JPEG
+        }
 
         updateViewfinderRatio()
         updateModeToggleUI()
@@ -185,11 +190,15 @@ class CameraFragment : Fragment() {
         setupLensSelector()
 
         fragmentCameraBinding.modeToggle?.setOnClickListener {
-            isJpeg = !isJpeg
+            outputFormat = when (outputFormat) {
+                OutputFormat.RAW -> OutputFormat.JPEG
+                OutputFormat.JPEG -> OutputFormat.WEBP
+                OutputFormat.WEBP -> OutputFormat.RAW
+            }
             updateModeToggleUI()
             updateSettingsUI()
             // The capture format is always RAW_SENSOR — only the save path
-            // differs (DNG vs DNG→Bitmap→JPEG). No need to restart the session.
+            // differs (DNG vs DNG→Bitmap→JPEG/WEBP). No need to restart the session.
         }
 
         fragmentCameraBinding.aspectRatioToggle?.setOnClickListener {
@@ -304,7 +313,7 @@ class CameraFragment : Fragment() {
     }
 
     private fun updateModeToggleUI() {
-        fragmentCameraBinding.modeToggle?.text = if (isJpeg) "JPEG" else "RAW"
+        fragmentCameraBinding.modeToggle?.text = outputFormat.name
     }
 
     private fun updateFlashUI() {
@@ -528,7 +537,7 @@ class CameraFragment : Fragment() {
         // captured at shutter press and used through the whole pipeline,
         // letting the user change it mid-flight would be confusing (was
         // the saved image processed with the old or the new filter?).
-        val filterAvailable = !isProcessing && isJpeg
+        val filterAvailable = !isProcessing && (outputFormat == OutputFormat.JPEG || outputFormat == OutputFormat.WEBP)
         setButtonActiveStyle(binding.filterToggle, filterAvailable)
         binding.filterToggle?.isEnabled = filterAvailable
 
@@ -907,7 +916,7 @@ class CameraFragment : Fragment() {
                 val finalSizes = if (format == args.pixelFormat) supportedSizes else streamMap.getOutputSizes(format)
                 val size = finalSizes?.maxByOrNull { it.height * it.width }
                     ?: throw RuntimeException("No supported sizes found for format $format on camera $currentCameraId")
-                Log.d(TAG, "Capture format=$format (isJpeg=$isJpeg), size=${size.width}x${size.height}")
+                Log.d(TAG, "Capture format=$format (outputFormat=$outputFormat), size=${size.width}x${size.height}")
                 
                 imageReader = ImageReader.newInstance(
                     size.width, size.height, format, IMAGE_BUFFER_SIZE
@@ -1026,10 +1035,10 @@ class CameraFragment : Fragment() {
                 val captured = withContext(Dispatchers.IO) { takePhoto() }
                 val saved: SaveOutput = captured.use { result ->
                     when {
-                        // RAW capture + user wants JPEG → demosaic into a Bitmap
-                        // first, then encode as JPEG. The same demosaiced bitmap
+                        // RAW capture + user wants JPEG or WebP → demosaic into a Bitmap
+                        // first, then encode as JPEG/WebP. The same demosaiced bitmap
                         // doubles as the source for the on-screen preview.
-                        result.format == ImageFormat.RAW_SENSOR && isJpeg -> {
+                        result.format == ImageFormat.RAW_SENSOR && (outputFormat == OutputFormat.JPEG || outputFormat == OutputFormat.WEBP) -> {
                             val bitmap = withContext(Dispatchers.IO) { rawToBitmap(result) }
                             try {
                                 val croppedBitmap = if (isSquare) cropToSquare(bitmap) else bitmap
@@ -1040,7 +1049,13 @@ class CameraFragment : Fragment() {
                                     FilmFilter.apply(croppedBitmap, filmSimulation)
                                 }
                                 try {
-                                    val file = withContext(Dispatchers.IO) { writeBitmapAsJpeg(finalBitmap) }
+                                    val file = withContext(Dispatchers.IO) {
+                                        if (outputFormat == OutputFormat.WEBP) {
+                                            writeBitmapAsWebp(finalBitmap)
+                                        } else {
+                                            writeBitmapAsJpeg(finalBitmap)
+                                        }
+                                    }
                                     val thumb = withContext(Dispatchers.Default) { makeThumbnail(finalBitmap) }
                                     SaveOutput(file, thumb)
                                 } finally {
@@ -1396,6 +1411,50 @@ class CameraFragment : Fragment() {
         }
     }
 
+    private fun writeBitmapAsWebp(bitmap: Bitmap): File {
+        val filename = "IMG_${
+            SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        }.webp"
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val contentValues = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, filename)
+                put(MediaStore.MediaColumns.MIME_TYPE, "image/webp")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DCIM}/Camera")
+            }
+            val resolver = requireContext().contentResolver
+            val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
+                ?: throw IOException("Failed to create MediaStore entry")
+            resolver.openOutputStream(uri)?.use { stream ->
+                java.io.BufferedOutputStream(stream, 64 * 1024).use { buf ->
+                    val compressFormat = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        Bitmap.CompressFormat.WEBP_LOSSY
+                    } else {
+                        @Suppress("DEPRECATION")
+                        Bitmap.CompressFormat.WEBP
+                    }
+                    bitmap.compress(compressFormat, 90, buf)
+                }
+            }
+            val dcim = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+            File(File(dcim, "Camera"), filename)
+        } else {
+            val dcim = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+            val file = File(File(dcim, "Camera").apply { if (!exists()) mkdirs() }, filename)
+            FileOutputStream(file).use { stream ->
+                java.io.BufferedOutputStream(stream, 64 * 1024).use { buf ->
+                    val compressFormat = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                        Bitmap.CompressFormat.WEBP_LOSSY
+                    } else {
+                        @Suppress("DEPRECATION")
+                        Bitmap.CompressFormat.WEBP
+                    }
+                    bitmap.compress(compressFormat, 90, buf)
+                }
+            }
+            file
+        }
+    }
+
     /**
      * Writes [result] to a DNG file with the correct orientation tag, then
      * tries to decode the result for an on-screen thumbnail. The decode can
@@ -1480,16 +1539,19 @@ class CameraFragment : Fragment() {
         buffer.get(bytes)
 
         // Decode-and-reencode path: needed whenever we have to crop to square
-        // OR apply a film simulation. Skipped for raw passthrough to avoid an
-        // unnecessary quality round-trip.
-        val needsDecode = isSquare || filmSimulation != FilmSimulation.NORMAL
+        // OR apply a film simulation OR user requested WEBP.
+        val needsDecode = isSquare || filmSimulation != FilmSimulation.NORMAL || outputFormat == OutputFormat.WEBP
         if (needsDecode) {
             val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                 ?: throw IOException("Failed to decode JPEG bytes for processing")
             val cropped = if (isSquare) cropToSquare(decoded) else decoded
             val processed = FilmFilter.apply(cropped, filmSimulation)
             try {
-                val file = writeBitmapAsJpeg(processed)
+                val file = if (outputFormat == OutputFormat.WEBP) {
+                    writeBitmapAsWebp(processed)
+                } else {
+                    writeBitmapAsJpeg(processed)
+                }
                 val thumb = makeThumbnail(processed)
                 return SaveOutput(file, thumb)
             } finally {

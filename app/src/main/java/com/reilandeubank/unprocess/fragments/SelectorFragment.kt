@@ -62,7 +62,7 @@ class SelectorFragment : Fragment() {
                             .navigate(SelectorFragmentDirections.actionSelectorToCamera(
                         item.cameraId,
                         item.format,
-                        item.convertToJpeg))
+                        item.outputFormat))
                 }
             }
         }
@@ -72,7 +72,7 @@ class SelectorFragment : Fragment() {
     companion object {
 
         /** Helper class used as a data holder for each selectable camera format item */
-        private data class FormatItem(val title: String, val cameraId: String, val format: Int, val convertToJpeg: Boolean)
+        private data class FormatItem(val title: String, val cameraId: String, val format: Int, val outputFormat: String)
 
         /** Helper function used to convert a lens orientation enum into a human-readable string */
         private fun lensOrientationString(value: Int) = when(value) {
@@ -113,11 +113,13 @@ class SelectorFragment : Fragment() {
                 if (orientation == "Back" && capabilities.contains(
                 CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES_RAW) &&
                 outputFormats.contains(ImageFormat.RAW_SENSOR)) {
-            availableCameras.add(FormatItem(
-                    "Save as RAW", id, ImageFormat.RAW_SENSOR, false))
-            availableCameras.add(FormatItem(
-                    "Save as JPEG", id, ImageFormat.RAW_SENSOR, true))
-        }
+                    availableCameras.add(FormatItem(
+                            "Save as RAW", id, ImageFormat.RAW_SENSOR, "RAW"))
+                    availableCameras.add(FormatItem(
+                            "Save as JPEG", id, ImageFormat.RAW_SENSOR, "JPEG"))
+                    availableCameras.add(FormatItem(
+                            "Save as WebP", id, ImageFormat.RAW_SENSOR, "WEBP"))
+                }
             }
 
             return availableCameras

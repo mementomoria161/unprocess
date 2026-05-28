@@ -52,8 +52,8 @@
                 android:name="pixel_format"
                 app:argType="integer" />
             <argument
-                android:name="convert_to_jpeg"
-                app:argType="boolean" />
+                android:name="output_format"
+                app:argType="string" />
         </action>
 
     </fragment>
@@ -74,8 +74,8 @@
             app:nullable="false" />
 
         <argument
-            android:name="convert_to_jpeg"
-            app:argType="boolean"
+            android:name="output_format"
+            app:argType="string"
             app:nullable="false" />
 
 

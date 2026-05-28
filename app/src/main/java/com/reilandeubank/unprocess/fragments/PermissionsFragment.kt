@@ -76,7 +76,7 @@ class PermissionsFragment : Fragment() {
                 PermissionsFragmentDirections.actionPermissionsToCamera(
                     cameraId,
                     android.graphics.ImageFormat.RAW_SENSOR,
-                    true
+                    "JPEG"
                 )
             )
         }
