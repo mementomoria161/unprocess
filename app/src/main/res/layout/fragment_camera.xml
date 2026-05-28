@@ -80,6 +80,20 @@
             android:minHeight="0dp" />
 
         <com.google.android.material.button.MaterialButton
+            android:id="@+id/filter_toggle"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:layout_marginEnd="8dp"
+            android:text="@string/filter_normal"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp" />
+
+        <com.google.android.material.button.MaterialButton
             android:id="@+id/settings_toggle"
             style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="48dp"

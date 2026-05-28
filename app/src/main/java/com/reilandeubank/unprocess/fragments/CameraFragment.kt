@@ -54,6 +54,8 @@ import com.reilandeubank.unprocess.utils.getPreviewOutputSize
 import com.reilandeubank.unprocess.utils.OrientationLiveData
 import com.reilandeubank.unprocess.R
 import com.reilandeubank.unprocess.databinding.FragmentCameraBinding
+import com.reilandeubank.unprocess.filter.FilmFilter
+import com.reilandeubank.unprocess.filter.FilmSimulation
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -155,6 +157,9 @@ class CameraFragment : Fragment() {
 
     private var isSettingsMode = false
 
+    /** Currently selected film simulation. Cycled via the filter toggle. */
+    private var filmSimulation: FilmSimulation = FilmSimulation.NORMAL
+
     private val physicalToLogicalMap = HashMap<String, String>()
 
     override fun onCreateView(
@@ -226,6 +231,12 @@ class CameraFragment : Fragment() {
 
         fragmentCameraBinding.settingsToggle?.setOnClickListener {
             toggleSettingsMode()
+        }
+
+        fragmentCameraBinding.filterToggle?.setOnClickListener {
+            filmSimulation = filmSimulation.next()
+            updateFilterUI()
+            updateSettingsUI()
         }
 
         val navOffsetListener = androidx.core.view.OnApplyWindowInsetsListener { v, insets ->
@@ -497,18 +508,25 @@ class CameraFragment : Fragment() {
         binding.flashToggle?.visibility = View.VISIBLE
         setButtonActiveStyle(binding.flashToggle, true)
         
-        // Aspect ratio and format/mode toggles are shown only in settings mode,
-        // and they are always active when visible.
+        // Aspect ratio, format/mode and filter toggles are shown only in
+        // settings mode, and are always active when visible.
         val settingsVisibility = if (isSettingsMode) View.VISIBLE else View.GONE
         binding.aspectRatioToggle?.visibility = settingsVisibility
         binding.modeToggle?.visibility = settingsVisibility
-        
+        binding.filterToggle?.visibility = settingsVisibility
+
         setButtonActiveStyle(binding.aspectRatioToggle, true)
         setButtonActiveStyle(binding.modeToggle, true)
-        
+        setButtonActiveStyle(binding.filterToggle, true)
+
         updateAspectRatioUI()
         updateFlashUI()
         updateModeToggleUI()
+        updateFilterUI()
+    }
+
+    private fun updateFilterUI() {
+        fragmentCameraBinding.filterToggle?.text = filmSimulation.displayName
     }
 
     private fun setButtonActiveStyle(button: com.google.android.material.button.MaterialButton?, active: Boolean) {
@@ -985,18 +1003,27 @@ class CameraFragment : Fragment() {
                         result.format == ImageFormat.RAW_SENSOR && isJpeg -> {
                             val bitmap = withContext(Dispatchers.IO) { rawToBitmap(result) }
                             try {
-                                val finalBitmap = if (isSquare) cropToSquare(bitmap) else bitmap
+                                val croppedBitmap = if (isSquare) cropToSquare(bitmap) else bitmap
+                                // Apply the selected film simulation. NORMAL is a
+                                // no-op and returns the same bitmap; otherwise the
+                                // result may be a new mutable bitmap.
+                                val finalBitmap = withContext(Dispatchers.Default) {
+                                    FilmFilter.apply(croppedBitmap, filmSimulation)
+                                }
                                 try {
                                     val file = withContext(Dispatchers.IO) { writeBitmapAsJpeg(finalBitmap) }
                                     val thumb = withContext(Dispatchers.Default) { makeThumbnail(finalBitmap) }
                                     SaveOutput(file, thumb)
                                 } finally {
-                                    if (finalBitmap !== bitmap) {
+                                    if (finalBitmap !== croppedBitmap && !finalBitmap.isRecycled) {
                                         finalBitmap.recycle()
+                                    }
+                                    if (croppedBitmap !== bitmap && !croppedBitmap.isRecycled) {
+                                        croppedBitmap.recycle()
                                     }
                                 }
                             } finally {
-                                bitmap.recycle()
+                                if (!bitmap.isRecycled) bitmap.recycle()
                             }
                         }
                         // RAW capture + user wants RAW → write DNG straight through.
@@ -1410,17 +1437,23 @@ class CameraFragment : Fragment() {
         val bytes = ByteArray(buffer.remaining())
         buffer.get(bytes)
 
-        if (isSquare) {
+        // Decode-and-reencode path: needed whenever we have to crop to square
+        // OR apply a film simulation. Skipped for raw passthrough to avoid an
+        // unnecessary quality round-trip.
+        val needsDecode = isSquare || filmSimulation != FilmSimulation.NORMAL
+        if (needsDecode) {
             val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                ?: throw IOException("Failed to decode JPEG bytes for cropping")
-            val cropped = cropToSquare(decoded)
+                ?: throw IOException("Failed to decode JPEG bytes for processing")
+            val cropped = if (isSquare) cropToSquare(decoded) else decoded
+            val processed = FilmFilter.apply(cropped, filmSimulation)
             try {
-                val file = writeBitmapAsJpeg(cropped)
-                val thumb = makeThumbnail(cropped)
+                val file = writeBitmapAsJpeg(processed)
+                val thumb = makeThumbnail(processed)
                 return SaveOutput(file, thumb)
             } finally {
-                cropped.recycle()
-                decoded.recycle()
+                if (processed !== cropped && !processed.isRecycled) processed.recycle()
+                if (cropped !== decoded && !cropped.isRecycled) cropped.recycle()
+                if (!decoded.isRecycled) decoded.recycle()
             }
         }
 

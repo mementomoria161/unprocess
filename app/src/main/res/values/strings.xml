@@ -21,4 +21,5 @@
     <string name="progress_thumbnail_desc">Preview of the saved image</string>
     <string name="aspect_ratio_full">4:3</string>
     <string name="aspect_ratio_square">1:1</string>
+    <string name="filter_normal">Normal</string>
 </resources>
