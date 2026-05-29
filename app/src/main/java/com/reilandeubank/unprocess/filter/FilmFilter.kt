@@ -37,6 +37,61 @@ object FilmFilter {
     /** Center hue (degrees) for each of the 8 HSL color ranges. */
     private val HSL_CENTERS = floatArrayOf(0f, 30f, 60f, 120f, 180f, 240f, 270f, 300f)
 
+    /** Pre-computed HSL hue weights table for each integer hue degree (0..359). */
+    private val HUE_WEIGHTS_TABLE: Array<FloatArray> = Array(360) { hue ->
+        val out = FloatArray(8)
+        var sum = 0f
+        for (i in 0..7) {
+            val center = HSL_CENTERS[i]
+            var d = abs(hue.toFloat() - center)
+            if (d > 180f) d = 360f - d
+            val w = if (d >= 60f) 0f else {
+                val n = 1f - d / 60f
+                n * n
+            }
+            out[i] = w
+            sum += w
+        }
+        if (sum > 0f) {
+            for (i in 0..7) out[i] /= sum
+        }
+        out
+    }
+
+    /** Pre-computed primary weights table for each integer hue degree (0..359). */
+    private val PRIMARY_WEIGHTS_TABLE: Array<FloatArray> = Array(360) { hue ->
+        val h = hue.toFloat()
+        floatArrayOf(
+            // Red primary weight (0f center)
+            run {
+                var d = abs(h - 0f)
+                if (d > 180f) d = 360f - d
+                if (d >= 60f) 0f else {
+                    val n = 1f - d / 60f
+                    n * n
+                }
+            },
+            // Green primary weight (120f center)
+            run {
+                var d = abs(h - 120f)
+                if (d > 180f) d = 360f - d
+                if (d >= 60f) 0f else {
+                    val n = 1f - d / 60f
+                    n * n
+                }
+            },
+            // Blue primary weight (240f center)
+            run {
+                var d = abs(h - 240f)
+                if (d > 180f) d = 360f - d
+                if (d >= 60f) 0f else {
+                    val n = 1f - d / 60f
+                    n * n
+                }
+            }
+        )
+    }
+
     /**
      * Applies [simulation] to [bitmap]. Returns either the same bitmap
      * (mutated in place — possible when the input is already mutable) or a
@@ -94,6 +149,9 @@ object FilmFilter {
         val needsHsv = anyHslAdj(p) || anyCalibAdj(p) ||
                 p.shadowTint != 0 || p.highlightSat != 0 || p.shadowSat != 0
 
+        val highlightHueF = p.highlightHue.toFloat().mod(360f)
+        val shadowHueF = p.shadowHue.toFloat().mod(360f)
+
         val numWorkers = workerCount(height)
         val chunkRows = ((height + numWorkers - 1) / numWorkers).coerceAtLeast(ROW_CHUNK)
 
@@ -102,7 +160,7 @@ object FilmFilter {
         //  shadow tint → split toning → vibrance / saturation)
         //
         // Workers process disjoint row ranges. Each worker holds its own
-        // rowBuf / hsv / weights buffers so no synchronisation is needed,
+        // rowBuf / hsv buffers so no synchronisation is needed,
         // and Bitmap.getPixels/setPixels on non-overlapping regions is safe
         // in practice (the bitmap is just a contiguous pixel buffer).
         parallelize(numWorkers) { workerIdx ->
@@ -112,7 +170,6 @@ object FilmFilter {
 
             val rowBuf = IntArray(width * ROW_CHUNK)
             val hsv = FloatArray(3)
-            val weights = FloatArray(8)
 
             var y = startY
             while (y < endY) {
@@ -153,10 +210,10 @@ object FilmFilter {
                         // RGB↔HSV conversion avoids the JNI overhead of
                         // Color.RGBToHSV / HSVToColor (~50-100 ns each).
                         rgbToHsv(r, g, b, hsv)
-                        applyHsl(hsv, p, weights)
+                        applyHsl(hsv, p)
                         applyCalibration(hsv, p)
                         applyShadowTint(hsv, p.shadowTint)
-                        applySplitToning(hsv, p)
+                        applySplitToning(hsv, p, highlightHueF, shadowHueF)
 
                         if (vibrance != 0f) {
                             val s = hsv[1]
@@ -250,25 +307,11 @@ object FilmFilter {
 
     // -------- Parallelism --------
 
-    /**
-     * Number of worker threads to use for a bitmap of [height] rows. Capped
-     * by core count (Lightroom-style filters are memory-bandwidth bound at
-     * some point so more than ~6 doesn't help), and capped from below so we
-     * never try to slice the bitmap into chunks smaller than [ROW_CHUNK].
-     */
     private fun workerCount(height: Int): Int {
-        // Use all available cores up to 8 — most current Android SoCs have
-        // 8 (4 big + 4 little). Above 8 the memory bandwidth becomes the
-        // bottleneck anyway.
         val cores = Runtime.getRuntime().availableProcessors().coerceIn(1, 8)
         return min(cores, max(1, height / ROW_CHUNK))
     }
 
-    /**
-     * Runs [work] N times concurrently with worker index 0..[n]-1. Joins
-     * before returning. Single-threaded fall-through when n == 1 so callers
-     * don't pay the thread-spawn cost on tiny captures.
-     */
     private fun parallelize(n: Int, work: (Int) -> Unit) {
         if (n <= 1) { work(0); return }
         val threads = (0 until n).map { idx ->
@@ -290,37 +333,19 @@ object FilmFilter {
         p.greenPrimaryHue != 0 || p.greenPrimarySat != 0 ||
         p.bluePrimaryHue != 0 || p.bluePrimarySat != 0
 
-    // -------- Clarity (local-contrast enhancement) --------
+    // -------- Clarity --------
 
-    /**
-     * Lightroom-style "Clarity" — boosts mid-frequency luminance contrast so
-     * the image looks crisper / more "HDR" without affecting global tonality
-     * or colour saturation (much).
-     *
-     * Implementation: extract a luminance plane from a downscaled copy of
-     * the bitmap, separable-box-blur it (3 passes ≈ Gaussian), then walk the
-     * full bitmap and add `amount * (pixelLum − blurredLum)` to each channel.
-     * Effect is gated to the mid-tonal range so it doesn't crush already-dark
-     * shadows or blow out highlights — that's where "details lost" usually
-     * comes from with naive clarity.
-     */
     private fun applyClarity(bitmap: Bitmap, amount: Float) {
         if (amount == 0f) return
         val w = bitmap.width
         val h = bitmap.height
-
-        // Downsample so the blur is cheap. 1/8 keeps a 4000-px wide capture
-        // at 500 px wide for the blur step.
         val scaleDown = 8
         val smallW = max(8, w / scaleDown)
         val smallH = max(8, h / scaleDown)
-
         val small = Bitmap.createScaledBitmap(bitmap, smallW, smallH, true)
         val smallPixels = IntArray(smallW * smallH)
         small.getPixels(smallPixels, 0, smallW, 0, 0, smallW, smallH)
         if (small !== bitmap) small.recycle()
-
-        // Extract BT.601 luminance into a float plane.
         val lum = FloatArray(smallW * smallH)
         for (i in smallPixels.indices) {
             val px = smallPixels[i]
@@ -329,25 +354,12 @@ object FilmFilter {
             val b = px and 0xff
             lum[i] = 0.299f * r + 0.587f * g + 0.114f * b
         }
-
         val blurred = separableBoxBlur(lum, smallW, smallH, radius = 6, passes = 3)
-
         val strength = (amount * 0.45f).coerceIn(-1f, 1f)
         val invScale = 1f / scaleDown.toFloat()
-
-        // Pre-compute the x→blurred-column lookup once per call. The blurred
-        // plane was already gauss-smoothed at 1/8 resolution, so nearest-
-        // neighbour sampling is visually indistinguishable from bilinear
-        // and saves 4 array reads + 4 mul + 3 add per pixel.
-        val xSamples = IntArray(w) { x ->
-            (x * invScale).toInt().coerceIn(0, smallW - 1)
-        }
-
-        // The application pass is per-pixel and easily parallelisable —
-        // each worker owns its own rowBuf, the blurred plane is read-only.
+        val xSamples = IntArray(w) { x -> (x * invScale).toInt().coerceIn(0, smallW - 1) }
         val numWorkers = workerCount(h)
         val chunkRows = ((h + numWorkers - 1) / numWorkers).coerceAtLeast(ROW_CHUNK)
-
         parallelize(numWorkers) { workerIdx ->
             val startY = workerIdx * chunkRows
             val endY = min(startY + chunkRows, h)
@@ -360,28 +372,23 @@ object FilmFilter {
                 for (ry in 0 until rows) {
                     val sy = ((y + ry) * invScale).toInt().coerceIn(0, smallH - 1)
                     val syRow = sy * smallW
-
                     for (x in 0 until w) {
                         val bL = blurred[syRow + xSamples[x]]
-
                         val idx = ry * w + x
                         val px = rowBuf[idx]
                         val a = px ushr 24 and 0xff
                         var r = px ushr 16 and 0xff
                         var g = px ushr 8 and 0xff
                         var bl = px and 0xff
-
                         val pxLum = 0.299f * r + 0.587f * g + 0.114f * bl
                         val detail = pxLum - bL
                         val midWeight = 1f - abs(pxLum / 255f - 0.5f) * 2f
                         val dMag = abs(detail)
                         val edgeFalloff = 1f / (1f + (dMag * dMag) * (1f / 6400f))
                         val delta = (detail * strength * (0.4f + 0.6f * midWeight) * edgeFalloff).toInt()
-
                         r = (r + delta).coerceIn(0, 255)
                         g = (g + delta).coerceIn(0, 255)
                         bl = (bl + delta).coerceIn(0, 255)
-
                         rowBuf[idx] = (a shl 24) or (r shl 16) or (g shl 8) or bl
                     }
                 }
@@ -391,16 +398,11 @@ object FilmFilter {
         }
     }
 
-    /**
-     * Separable box blur via rolling sum (O(w·h) per pass per direction).
-     * [passes] = 3 closely approximates a Gaussian with σ ≈ radius·√(passes/3).
-     */
     private fun separableBoxBlur(src: FloatArray, w: Int, h: Int, radius: Int, passes: Int): FloatArray {
         val count = (2 * radius + 1).toFloat()
         var a = src.copyOf()
         var b = FloatArray(w * h)
         repeat(passes) {
-            // Horizontal
             for (y in 0 until h) {
                 val rowStart = y * w
                 var sum = 0f
@@ -414,7 +416,6 @@ object FilmFilter {
                 }
             }
             run { val t = a; a = b; b = t }
-            // Vertical
             for (x in 0 until w) {
                 var sum = 0f
                 for (k in -radius..radius) sum += a[k.coerceIn(0, h - 1) * w + x]
@@ -433,11 +434,6 @@ object FilmFilter {
 
     // -------- LUT construction --------
 
-    /**
-     * Builds a 256-entry LUT that combines contrast, highlights, shadows,
-     * whites, blacks and the master point curve into a single lookup.
-     * Light values are interpreted as -100..+100 (Lightroom-ish).
-     */
     private fun buildMasterLut(p: FilmParams): IntArray {
         val lut = IntArray(256)
         val contrast = p.contrast / 100f
@@ -445,38 +441,19 @@ object FilmFilter {
         val shadows = p.shadows / 100f
         val whites = p.whites / 100f
         val blacks = p.blacks / 100f
-
         for (i in 0..255) {
             var v = i / 255f
-
-            if (contrast != 0f) {
-                v = ((v - 0.5f) * (1f + contrast) + 0.5f).coerceIn(0f, 1f)
-            }
-            if (highlights != 0f && v > 0.5f) {
-                val w = (v - 0.5f) * 2f
-                v = (v + highlights * w * 0.25f).coerceIn(0f, 1f)
-            }
-            if (shadows != 0f && v < 0.5f) {
-                val w = (0.5f - v) * 2f
-                v = (v + shadows * w * 0.25f).coerceIn(0f, 1f)
-            }
-            if (whites != 0f && v > 0.7f) {
-                val w = ((v - 0.7f) / 0.3f).coerceIn(0f, 1f)
-                v = (v + whites * w * 0.2f).coerceIn(0f, 1f)
-            }
-            if (blacks != 0f && v < 0.3f) {
-                val w = ((0.3f - v) / 0.3f).coerceIn(0f, 1f)
-                v = (v + blacks * w * 0.2f).coerceIn(0f, 1f)
-            }
-
-            // Apply master point curve in 0..255 space.
+            if (contrast != 0f) v = ((v - 0.5f) * (1f + contrast) + 0.5f).coerceIn(0f, 1f)
+            if (highlights != 0f && v > 0.5f) v = (v + highlights * (v - 0.5f) * 2f * 0.25f).coerceIn(0f, 1f)
+            if (shadows != 0f && v < 0.5f) v = (v + shadows * (0.5f - v) * 2f * 0.25f).coerceIn(0f, 1f)
+            if (whites != 0f && v > 0.7f) v = (v + whites * ((v - 0.7f) / 0.3f).coerceIn(0f, 1f) * 0.2f).coerceIn(0f, 1f)
+            if (blacks != 0f && v < 0.3f) v = (v + blacks * ((0.3f - v) / 0.3f).coerceIn(0f, 1f) * 0.2f).coerceIn(0f, 1f)
             val afterCurve = applyCurve(v * 255f, p.pointCurve)
             lut[i] = afterCurve.toInt().coerceIn(0, 255)
         }
         return lut
     }
 
-    /** Builds a 256-entry LUT from a per-channel control-point curve. */
     private fun buildChannelLut(curve: List<Pair<Int, Int>>): IntArray {
         val lut = IntArray(256)
         for (i in 0..255) {
@@ -485,10 +462,6 @@ object FilmFilter {
         return lut
     }
 
-    /**
-     * Linear-interpolates [x] (0..255) through the sorted-by-input control
-     * points in [curve]. Returns 0..255.
-     */
     private fun applyCurve(x: Float, curve: List<Pair<Int, Int>>): Float {
         if (curve.isEmpty()) return x
         val sorted = if (curve.size <= 1 || curve.zipWithNext().all { it.first.first <= it.second.first }) {
@@ -510,10 +483,6 @@ object FilmFilter {
     }
 
     // -------- Inline RGB↔HSV --------
-    //
-    // Equivalent to Color.RGBToHSV / Color.HSVToColor, but pure Kotlin
-    // so the JIT can inline them into the per-pixel loop and skip the JNI
-    // boundary cross (~50-100 ns each, ~2 s saved across 12 MP × 2 calls).
 
     private fun rgbToHsv(r: Int, g: Int, b: Int, hsv: FloatArray) {
         val mx = if (r >= g) (if (r >= b) r else b) else (if (g >= b) g else b)
@@ -535,7 +504,6 @@ object FilmFilter {
         }
     }
 
-    /** Returns RGB packed as 0x00RRGGBB (alpha is not set). */
     private fun hsvToRgb(hsv: FloatArray): Int {
         val s = hsv[1]
         val v = hsv[2]
@@ -564,54 +532,27 @@ object FilmFilter {
 
     // -------- HSL --------
 
-    /**
-     * Computes weights (sum-normalized) of [hueDeg] across the 8 HSL color
-     * ranges. Result is written into [out] (length 8).
-     */
-    private fun hueWeights(hueDeg: Float, out: FloatArray) {
-        var sum = 0f
-        for (i in 0..7) {
-            val center = HSL_CENTERS[i]
-            var d = abs(hueDeg - center)
-            if (d > 180f) d = 360f - d
-            // Falloff window of 30° on either side — gives smooth blend
-            // between adjacent Lightroom color ranges.
-            val w = if (d >= 60f) 0f else {
-                val n = 1f - d / 60f
-                n * n
-            }
-            out[i] = w
-            sum += w
-        }
-        if (sum > 0f) {
-            for (i in 0..7) out[i] /= sum
-        }
-    }
-
-    /**
-     * [weights] is a 8-entry scratch buffer the caller owns (so this is
-     * thread-safe — each worker passes its own buffer).
-     */
-    private fun applyHsl(hsv: FloatArray, p: FilmParams, weights: FloatArray) {
-        // Cheap fast-path: skip the trig+weighting if all adjustments are 0.
+    private fun applyHsl(hsv: FloatArray, p: FilmParams) {
         var anyAdj = false
         for (i in 0..7) {
             if (p.hslHue[i] != 0 || p.hslSat[i] != 0 || p.hslLum[i] != 0) { anyAdj = true; break }
         }
         if (!anyAdj) return
 
-        hueWeights(hsv[0], weights)
+        val hInt = hsv[0].toInt().coerceIn(0, 359)
+        val weights = HUE_WEIGHTS_TABLE[hInt]
         var hueShift = 0f
         var satFactor = 1f
         var lumFactor = 1f
         for (i in 0..7) {
             val w = weights[i]
             if (w == 0f) continue
-            hueShift += w * p.hslHue[i] * 0.36f  // ±100 → ±36°
+            hueShift += w * p.hslHue[i] * 0.36f
             satFactor += w * p.hslSat[i] / 100f
             lumFactor += w * p.hslLum[i] / 100f
         }
-        hsv[0] = (hsv[0] + hueShift).mod(360f)
+        val hNew = hsv[0] + hueShift
+        hsv[0] = if (hNew < 0f) (hNew % 360f) + 360f else if (hNew >= 360f) hNew % 360f else hNew
         hsv[1] = (hsv[1] * satFactor).coerceIn(0f, 1f)
         hsv[2] = (hsv[2] * lumFactor).coerceIn(0f, 1f)
     }
@@ -621,135 +562,138 @@ object FilmFilter {
             p.greenPrimaryHue == 0 && p.greenPrimarySat == 0 &&
             p.bluePrimaryHue == 0 && p.bluePrimarySat == 0) return
 
-        val h = hsv[0]
-        // Distance to each primary; weight = max(0, 1 - d/60)^2
-        val wR = primaryWeight(h, 0f)
-        val wG = primaryWeight(h, 120f)
-        val wB = primaryWeight(h, 240f)
+        val hInt = hsv[0].toInt().coerceIn(0, 359)
+        val pWeights = PRIMARY_WEIGHTS_TABLE[hInt]
+        val wR = pWeights[0]; val wG = pWeights[1]; val wB = pWeights[2]
         val sum = wR + wG + wB
         if (sum <= 0f) return
         val nR = wR / sum; val nG = wG / sum; val nB = wB / sum
 
-        val hueShift = nR * p.redPrimaryHue * 0.4f +
-                nG * p.greenPrimaryHue * 0.4f +
-                nB * p.bluePrimaryHue * 0.4f
+        val hueShift = nR * p.redPrimaryHue * 0.4f + nG * p.greenPrimaryHue * 0.4f + nB * p.bluePrimaryHue * 0.4f
         val satFactor = 1f + (nR * p.redPrimarySat + nG * p.greenPrimarySat + nB * p.bluePrimarySat) / 100f
 
-        hsv[0] = (hsv[0] + hueShift).mod(360f)
+        val hNew = hsv[0] + hueShift
+        hsv[0] = if (hNew < 0f) (hNew % 360f) + 360f else if (hNew >= 360f) hNew % 360f else hNew
         hsv[1] = (hsv[1] * satFactor).coerceIn(0f, 1f)
-    }
-
-    private fun primaryWeight(hue: Float, center: Float): Float {
-        var d = abs(hue - center)
-        if (d > 180f) d = 360f - d
-        if (d >= 60f) return 0f
-        val n = 1f - d / 60f
-        return n * n
     }
 
     private fun applyShadowTint(hsv: FloatArray, shadowTint: Int) {
         if (shadowTint == 0) return
-        // Push hue toward magenta (+) or green (-) for low-value pixels only.
         val v = hsv[2]
         if (v >= 0.5f) return
         val w = (0.5f - v) * 2f
-        val shift = if (shadowTint > 0) {
-            // toward magenta (300°)
-            (300f - hsv[0]).let { if (it > 180f) it - 360f else if (it < -180f) it + 360f else it } * w * (shadowTint / 100f) * 0.25f
-        } else {
-            // toward green (120°)
-            (120f - hsv[0]).let { if (it > 180f) it - 360f else if (it < -180f) it + 360f else it } * w * (-shadowTint / 100f) * 0.25f
-        }
-        hsv[0] = (hsv[0] + shift).mod(360f)
+        val targetH = if (shadowTint > 0) 300f else 120f
+        var diff = targetH - hsv[0]
+        if (diff > 180f) diff -= 360f
+        if (diff < -180f) diff += 360f
+        val absTint = if (shadowTint > 0) shadowTint else -shadowTint
+        val shift = diff * w * (absTint / 100f) * 0.25f
+        val hNew = hsv[0] + shift
+        hsv[0] = if (hNew < 0f) (hNew % 360f) + 360f else if (hNew >= 360f) hNew % 360f else hNew
     }
 
-    private fun applySplitToning(hsv: FloatArray, p: FilmParams) {
+    private fun applySplitToning(hsv: FloatArray, p: FilmParams, highlightHueF: Float, shadowHueF: Float) {
         if (p.highlightSat == 0 && p.shadowSat == 0) return
         val v = hsv[2]
-        // Linear weights: 0 at v=0.5 (mid), 1 at extremes.
         val hiW = ((v - 0.5f) * 2f).coerceAtLeast(0f)
         val shW = ((0.5f - v) * 2f).coerceAtLeast(0f)
 
         if (p.highlightSat != 0 && hiW > 0f) {
-            val targetH = p.highlightHue.toFloat().mod(360f)
             val targetS = (p.highlightSat / 100f) * hiW
-            blendTowardHs(hsv, targetH, targetS)
+            blendTowardHs(hsv, highlightHueF, targetS)
         }
         if (p.shadowSat != 0 && shW > 0f) {
-            val targetH = p.shadowHue.toFloat().mod(360f)
             val targetS = (p.shadowSat / 100f) * shW
-            blendTowardHs(hsv, targetH, targetS)
+            blendTowardHs(hsv, shadowHueF, targetS)
         }
     }
 
     private fun blendTowardHs(hsv: FloatArray, hue: Float, weight: Float) {
-        // Soft additive: nudge hue toward target, raise saturation slightly.
         val current = hsv[0]
         var diff = hue - current
         if (diff > 180f) diff -= 360f
         if (diff < -180f) diff += 360f
-        hsv[0] = (current + diff * weight * 0.3f).mod(360f)
+        val hNew = current + diff * weight * 0.3f
+        hsv[0] = if (hNew < 0f) (hNew % 360f) + 360f else if (hNew >= 360f) hNew % 360f else hNew
         hsv[1] = (hsv[1] + weight * 0.3f).coerceIn(0f, 1f)
     }
 
     // -------- Effects --------
 
-    /**
-     * Deterministic noise field. Cell size set by [size] (Lightroom's grain
-     * size 0..100 ≈ 1..5 px); cells smoothed by [roughness] using a cosine
-     * blend with neighbours so grain doesn't look pixelated.
-     */
     private class Grain(amount: Int, size: Int, roughness: Int, val w: Int, val h: Int) {
         private val amplitude: Float = amount * 0.45f
         private val cellPx: Int = max(1, (1 + size / 25f).toInt())
         private val smoothness: Float = (roughness / 100f).coerceIn(0f, 1f)
         private val rng = Random(w.toLong() * 73856093L xor h.toLong() * 19349663L xor amount.toLong())
-        private val cellsX = max(1, (w + cellPx - 1) / cellPx)
-        private val cellsY = max(1, (h + cellPx - 1) / cellPx)
-        private val field = FloatArray(cellsX * cellsY).apply {
-            for (i in indices) this[i] = (rng.nextFloat() - 0.5f) * 2f
+        
+        private val patternSize = 512
+        private val grainPattern = IntArray(patternSize * patternSize)
+
+        init {
+            val cellsX = max(1, (patternSize + cellPx - 1) / cellPx)
+            val cellsY = max(1, (patternSize + cellPx - 1) / cellPx)
+            val field = FloatArray(cellsX * cellsY) { (rng.nextFloat() - 0.5f) * 2f }
+
+            for (py in 0 until patternSize) {
+                val cy = min(cellsY - 1, py / cellPx)
+                val downIdxOffset = if (cy + 1 < cellsY) cellsX else 0
+                val ty = (py % cellPx) / cellPx.toFloat()
+                val sy = if (smoothness > 0f) 0.5f - 0.5f * cos((ty * 3.1415927f)) else ty
+                val cyRow = cy * cellsX
+                val pyRow = py * patternSize
+
+                for (px in 0 until patternSize) {
+                    val cx = min(cellsX - 1, px / cellPx)
+                    val baseIdx = cyRow + cx
+                    val base = field[baseIdx]
+                    val rightIdx = if (cx + 1 < cellsX) baseIdx + 1 else baseIdx
+                    val downIdx = baseIdx + downIdxOffset
+                    val cornerIdx = if (cx + 1 < cellsX) downIdx + 1 else downIdx
+                    val tx = (px % cellPx) / cellPx.toFloat()
+                    val sx = if (smoothness > 0f) 0.5f - 0.5f * cos((tx * 3.1415927f)) else tx
+                    val v = base * (1f - sx) * (1f - sy) +
+                            field[rightIdx] * sx * (1f - sy) +
+                            field[downIdx] * (1f - sx) * sy +
+                            field[cornerIdx] * sx * sy
+                    grainPattern[pyRow + px] = (v * amplitude).toInt()
+                }
+            }
         }
 
         fun valueAt(x: Int, y: Int): Int {
-            val cx = min(cellsX - 1, x / cellPx)
-            val cy = min(cellsY - 1, y / cellPx)
-            val baseIdx = cy * cellsX + cx
-            val base = field[baseIdx]
-            // Light smoothing: blend with right/down neighbours by smoothness.
-            val rightIdx = if (cx + 1 < cellsX) baseIdx + 1 else baseIdx
-            val downIdx = if (cy + 1 < cellsY) baseIdx + cellsX else baseIdx
-            val tx = (x % cellPx) / cellPx.toFloat()
-            val ty = (y % cellPx) / cellPx.toFloat()
-            val sx = if (smoothness > 0f) 0.5f - 0.5f * cos((tx * 3.1415927f)) else tx
-            val sy = if (smoothness > 0f) 0.5f - 0.5f * cos((ty * 3.1415927f)) else ty
-            val v = base * (1f - sx) * (1f - sy) +
-                    field[rightIdx] * sx * (1f - sy) +
-                    field[downIdx] * (1f - sx) * sy +
-                    field[if (cx + 1 < cellsX && cy + 1 < cellsY) baseIdx + cellsX + 1 else baseIdx] * sx * sy
-            return (v * amplitude).toInt()
+            val px = x and 511
+            val py = y and 511
+            return grainPattern[(py shl 9) + px]
         }
     }
 
-    /**
-     * Radial darkening (or brightening for positive [amount] — Lightroom-style
-     * with negative amounts darkening corners). Midpoint controls how soon
-     * the falloff begins from the centre.
-     */
     private class Vignette(amount: Int, midpoint: Int, val w: Int, val h: Int) {
         private val cx = w / 2f
         private val cy = h / 2f
         private val maxR = sqrt(cx * cx + cy * cy)
-        private val amt = amount / 100f  // negative → darker corners
+        private val maxRSq = maxR * maxR
+        private val amt = amount / 100f
         private val mid = (midpoint.coerceIn(0, 100)) / 100f
+        private val tableSize = 2048
+        private val factorTable = FloatArray(tableSize) { index ->
+            val rSqFraction = index.toFloat() / (tableSize - 1)
+            val r = sqrt(rSqFraction)
+            if (r <= mid) {
+                1f
+            } else {
+                val t = ((r - mid) / (1f - mid)).coerceIn(0f, 1f)
+                val falloff = 1f - exp(-3f * t * t)
+                (1f + amt * falloff).coerceIn(0f, 2f)
+            }
+        }
 
         fun factorAt(x: Int, y: Int): Float {
             val dx = x - cx
             val dy = y - cy
-            val r = sqrt(dx * dx + dy * dy) / maxR  // 0 center, 1 corner
-            if (r <= mid) return 1f
-            val t = ((r - mid) / (1f - mid)).coerceIn(0f, 1f)
-            val falloff = 1f - exp(-3f * t * t)  // smooth ramp
-            return (1f + amt * falloff).coerceIn(0f, 2f)
+            val distSq = dx * dx + dy * dy
+            val fraction = distSq / maxRSq
+            val index = (fraction * (tableSize - 1)).toInt().coerceIn(0, tableSize - 1)
+            return factorTable[index]
         }
     }
 
