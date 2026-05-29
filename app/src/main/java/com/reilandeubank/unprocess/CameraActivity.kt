@@ -25,6 +25,7 @@ import android.view.WindowManager
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
 import androidx.navigation.fragment.NavHostFragment
+import com.google.android.material.color.DynamicColors
 import com.reilandeubank.unprocess.databinding.ActivityCameraBinding
 import com.reilandeubank.unprocess.fragments.CameraFragment
 
@@ -33,6 +34,7 @@ class CameraActivity : AppCompatActivity() {
     private lateinit var activityCameraBinding: ActivityCameraBinding
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        DynamicColors.applyToActivityIfAvailable(this)
         super.onCreate(savedInstanceState)
         
         // Enable edge-to-edge

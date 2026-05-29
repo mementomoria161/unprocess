@@ -558,10 +558,20 @@ class CameraFragment : Fragment() {
         updateSettingsUI()
     }
 
+    private fun getPrimaryColor(): Int {
+        val typedValue = android.util.TypedValue()
+        val theme = requireContext().theme
+        return if (theme.resolveAttribute(com.google.android.material.R.attr.colorPrimary, typedValue, true)) {
+            typedValue.data
+        } else {
+            ContextCompat.getColor(requireContext(), R.color.primary)
+        }
+    }
+
     private fun setButtonActiveStyle(button: com.google.android.material.button.MaterialButton?, active: Boolean) {
         if (button == null) return
         if (active) {
-            button.backgroundTintList = ColorStateList.valueOf(ContextCompat.getColor(requireContext(), R.color.primary))
+            button.backgroundTintList = ColorStateList.valueOf(getPrimaryColor())
             button.setTextColor(Color.BLACK)
             button.iconTint = ColorStateList.valueOf(Color.BLACK)
         } else {
@@ -762,7 +772,7 @@ class CameraFragment : Fragment() {
             val button = container.getChildAt(i) as com.google.android.material.button.MaterialButton
             val cameraId = allCameraIds.getOrNull(i)
             if (cameraId == currentCameraId) {
-                button.setBackgroundColor(ContextCompat.getColor(requireContext(), R.color.primary)) 
+                button.setBackgroundColor(getPrimaryColor()) 
                 button.setTextColor(Color.BLACK)
                 button.alpha = 1.0f
             } else {
