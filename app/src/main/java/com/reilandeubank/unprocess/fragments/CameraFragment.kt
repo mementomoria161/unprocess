@@ -44,6 +44,8 @@ import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.View
 import android.view.ViewGroup
+import android.view.PixelCopy
+import android.view.SurfaceView
 import androidx.fragment.app.Fragment
 import androidx.lifecycle.Observer
 import androidx.lifecycle.lifecycleScope
@@ -175,12 +177,38 @@ class CameraFragment : Fragment() {
     @SuppressLint("MissingPermission")
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
-        currentCameraId = args.cameraId
-        outputFormat = when (args.outputFormat.uppercase()) {
+        
+        val sharedPrefs = requireContext().getSharedPreferences("unprocess_settings", Context.MODE_PRIVATE)
+        val savedFormat = sharedPrefs.getString("pref_output_format", null)
+        outputFormat = when (savedFormat) {
             "RAW" -> OutputFormat.RAW
             "WEBP" -> OutputFormat.WEBP
-            else -> OutputFormat.JPEG
+            "JPEG" -> OutputFormat.JPEG
+            else -> when (args.outputFormat.uppercase()) {
+                "RAW" -> OutputFormat.RAW
+                "WEBP" -> OutputFormat.WEBP
+                else -> OutputFormat.JPEG
+            }
         }
+        isSquare = sharedPrefs.getBoolean("pref_is_square", false)
+        flashMode = sharedPrefs.getInt("pref_flash_mode", CaptureRequest.CONTROL_AE_MODE_ON)
+        
+        val savedFilm = sharedPrefs.getString("pref_film_simulation", null)
+        filmSimulation = if (savedFilm != null) {
+            try {
+                FilmSimulation.valueOf(savedFilm)
+            } catch (e: Exception) {
+                FilmSimulation.NORMAL
+            }
+        } else {
+            FilmSimulation.NORMAL
+        }
+        
+        if (outputFormat == OutputFormat.RAW) {
+            filmSimulation = FilmSimulation.NORMAL
+        }
+
+        currentCameraId = args.cameraId
 
         updateViewfinderRatio()
         updateModeToggleUI()
@@ -195,8 +223,12 @@ class CameraFragment : Fragment() {
                 OutputFormat.JPEG -> OutputFormat.WEBP
                 OutputFormat.WEBP -> OutputFormat.RAW
             }
+            if (outputFormat == OutputFormat.RAW) {
+                filmSimulation = FilmSimulation.NORMAL
+            }
             updateModeToggleUI()
             updateSettingsUI()
+            saveSettings()
             // The capture format is always RAW_SENSOR — only the save path
             // differs (DNG vs DNG→Bitmap→JPEG/WEBP). No need to restart the session.
         }
@@ -206,6 +238,7 @@ class CameraFragment : Fragment() {
             updateAspectRatioUI()
             updateViewfinderRatio()
             updateSettingsUI()
+            saveSettings()
             if (!isShowingDone) {
                 initializeCamera()
             }
@@ -219,6 +252,7 @@ class CameraFragment : Fragment() {
             }
             updateFlashUI()
             updateSettingsUI()
+            saveSettings()
             
             // Try to update the existing session if possible
             try {
@@ -246,6 +280,7 @@ class CameraFragment : Fragment() {
             filmSimulation = filmSimulation.next()
             updateFilterUI()
             updateSettingsUI()
+            saveSettings()
         }
 
         val navOffsetListener = androidx.core.view.OnApplyWindowInsetsListener { v, insets ->
@@ -338,6 +373,7 @@ class CameraFragment : Fragment() {
         val id: String,
         val focalLength: Float,
         val label: String,
+        val effectiveZoom: Float,
     )
 
     private fun setupLensSelector() {
@@ -440,7 +476,7 @@ class CameraFragment : Fragment() {
             }
 
             val label = if (usedLabels.add(base)) base else "$base ($id)".also { usedLabels.add(it) }
-            LensEntry(id, focal, label)
+            LensEntry(id, focal, label, effectiveZoom)
         }
 
         allCameraIds = entries.map { it.id }
@@ -478,6 +514,18 @@ class CameraFragment : Fragment() {
             }
             container?.addView(button)
         }
+
+        // Resolve logical camera ID to the matching physical camera ID on startup
+        val matchingEntries = entries.filter { it.id == currentCameraId || physicalToLogicalMap[it.id] == currentCameraId }
+        val resolvedEntry = if (matchingEntries.isNotEmpty()) {
+            matchingEntries.minByOrNull { kotlin.math.abs(it.effectiveZoom - 1.0f) }
+        } else {
+            entries.firstOrNull()
+        }
+        if (resolvedEntry != null && currentCameraId != resolvedEntry.id) {
+            currentCameraId = resolvedEntry.id
+        }
+
         updateLensHighlight()
     }
 
@@ -614,6 +662,8 @@ class CameraFragment : Fragment() {
      *  the Done state (Take-new pressed, error, fragment torn down). */
     private var doneThumbnail: Bitmap? = null
 
+    private var frozenThumbnail: Bitmap? = null
+
     /** True while the Done overlay (saved image) is visible — in that state
      *  the capture button doubles as "Take new". */
     private var isShowingDone: Boolean = false
@@ -625,7 +675,7 @@ class CameraFragment : Fragment() {
     /** Lifecycle stage of a capture, drives the overlay state machine. */
     private sealed class CaptureProgress {
         /** HAL is exposing + the file is being saved. UI: just a dim. */
-        object Saving : CaptureProgress()
+        data class Saving(val frozenBitmap: Bitmap?) : CaptureProgress()
         /** Save complete — show the saved image fitCenter at preview size. */
         data class Done(val thumbnail: Bitmap?) : CaptureProgress()
         /** Save failed — overlay flashes off after the error indicator. */
@@ -650,9 +700,28 @@ class CameraFragment : Fragment() {
 
         when (state) {
             is CaptureProgress.Saving -> {
-                // Dim the preview, no thumbnail yet, no spinner, no text.
-                thumbnail.visibility = View.GONE
-                thumbnail.setImageDrawable(null)
+                val oldFrozen = frozenThumbnail
+                frozenThumbnail = state.frozenBitmap
+                if (state.frozenBitmap != null) {
+                    thumbnail.setImageBitmap(state.frozenBitmap)
+                    thumbnail.visibility = View.VISIBLE
+                    thumbnail.alpha = 1.0f
+                    // Apply a dark color filter (80% black) on top of the opaque frozen preview image
+                    thumbnail.setColorFilter(Color.argb(204, 0, 0, 0))
+                    
+                    // Adjust viewfinder container ratio to match the frozen thumbnail aspect ratio
+                    val ratio = "${state.frozenBitmap.width}:${state.frozenBitmap.height}"
+                    val constraintSet = androidx.constraintlayout.widget.ConstraintSet()
+                    constraintSet.clone(binding.root as androidx.constraintlayout.widget.ConstraintLayout)
+                    constraintSet.setDimensionRatio(R.id.view_finder_container, ratio)
+                    constraintSet.applyTo(binding.root as androidx.constraintlayout.widget.ConstraintLayout)
+                } else {
+                    thumbnail.visibility = View.GONE
+                    thumbnail.setImageDrawable(null)
+                    thumbnail.clearColorFilter()
+                }
+                oldFrozen?.takeIf { it !== state.frozenBitmap && !it.isRecycled }?.recycle()
+                
                 overlay.visibility = View.VISIBLE
                 overlay.alpha = 0f
                 overlay.animate().alpha(1f).setDuration(180L).start()
@@ -660,6 +729,8 @@ class CameraFragment : Fragment() {
                 updateCaptureButtonForState()
             }
             is CaptureProgress.Done -> {
+                thumbnail.alpha = 1.0f
+                thumbnail.clearColorFilter() // Clear the color filter for the final saved image
                 overlay.visibility = View.VISIBLE
                 overlay.alpha = 1f
                 val oldBitmap = doneThumbnail
@@ -681,6 +752,10 @@ class CameraFragment : Fragment() {
                     thumbnail.visibility = View.GONE
                 }
                 oldBitmap?.takeIf { it !== state.thumbnail && !it.isRecycled }?.recycle()
+                
+                frozenThumbnail?.takeIf { !it.isRecycled }?.recycle()
+                frozenThumbnail = null
+                
                 isShowingDone = true
                 updateCaptureButtonForState()
             }
@@ -710,8 +785,12 @@ class CameraFragment : Fragment() {
         overlay.alpha = 1f
         thumbnail.visibility = View.GONE
         thumbnail.setImageDrawable(null)
+        thumbnail.alpha = 1.0f
+        thumbnail.clearColorFilter()
         doneThumbnail?.takeIf { !it.isRecycled }?.recycle()
         doneThumbnail = null
+        frozenThumbnail?.takeIf { !it.isRecycled }?.recycle()
+        frozenThumbnail = null
         isShowingDone = false
         updateCaptureButtonForState()
         
@@ -1025,6 +1104,32 @@ class CameraFragment : Fragment() {
      *   demosaic finished  → spinner + "Speichere JPEG…"  /  "Speichere RAW (DNG)…"
      *   write done         → ✓ "Gespeichert" (briefly)
      */
+    private suspend fun captureSurfaceBitmap(surfaceView: SurfaceView): Bitmap? = suspendCancellableCoroutine { cont ->
+        val width = surfaceView.width
+        val height = surfaceView.height
+        if (width <= 0 || height <= 0) {
+            cont.resume(null)
+            return@suspendCancellableCoroutine
+        }
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        val handlerThread = HandlerThread("PixelCopyThread").apply { start() }
+        try {
+            PixelCopy.request(surfaceView, bitmap, { copyResult ->
+                if (copyResult == PixelCopy.SUCCESS) {
+                    if (cont.isActive) cont.resume(bitmap)
+                } else {
+                    Log.w(TAG, "PixelCopy failed with code $copyResult")
+                    if (cont.isActive) cont.resume(null)
+                }
+                handlerThread.quitSafely()
+            }, Handler(handlerThread.looper))
+        } catch (e: Exception) {
+            Log.e(TAG, "PixelCopy failed with exception", e)
+            if (cont.isActive) cont.resume(null)
+            handlerThread.quitSafely()
+        }
+    }
+
     private fun handleCaptureClick(button: View) {
         if (!::session.isInitialized) return
         
@@ -1038,9 +1143,9 @@ class CameraFragment : Fragment() {
         setProcessing(true)
 
         viewLifecycleOwner.lifecycleScope.launch {
-            // Single dim from button-press through save-complete — no
-            // intermediate spinner / text states.
-            showProgress(CaptureProgress.Saving)
+            // Capture a snapshot of the viewfinder to freeze it on screen
+            val frozen = captureSurfaceBitmap(fragmentCameraBinding.viewFinder)
+            showProgress(CaptureProgress.Saving(frozen))
             try {
                 val captured = withContext(Dispatchers.IO) { takePhoto() }
                 val saved: SaveOutput = captured.use { result ->
@@ -1605,6 +1710,17 @@ class CameraFragment : Fragment() {
         return SaveOutput(file, thumbnail)
     }
 
+    private fun saveSettings() {
+        val sharedPrefs = requireContext().getSharedPreferences("unprocess_settings", Context.MODE_PRIVATE)
+        sharedPrefs.edit().apply {
+            putString("pref_output_format", outputFormat.name)
+            putBoolean("pref_is_square", isSquare)
+            putInt("pref_flash_mode", flashMode)
+            putString("pref_film_simulation", filmSimulation.name)
+            apply()
+        }
+    }
+
     override fun onStop() {
         super.onStop()
         cameraJob?.cancel()
@@ -1620,6 +1736,8 @@ class CameraFragment : Fragment() {
     override fun onDestroyView() {
         doneThumbnail?.takeIf { !it.isRecycled }?.recycle()
         doneThumbnail = null
+        frozenThumbnail?.takeIf { !it.isRecycled }?.recycle()
+        frozenThumbnail = null
         _fragmentCameraBinding = null
         super.onDestroyView()
     }
