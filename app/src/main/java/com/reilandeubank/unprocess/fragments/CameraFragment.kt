@@ -159,6 +159,7 @@ class CameraFragment : Fragment() {
     private var isSquare: Boolean = false
 
     private var isSettingsMode = false
+    private var isAnimatingSettings = false
 
     /** Currently selected film simulation. Cycled via the filter toggle. */
     private var filmSimulation: FilmSimulation = FilmSimulation.NORMAL
@@ -274,6 +275,12 @@ class CameraFragment : Fragment() {
 
         fragmentCameraBinding.settingsToggle?.setOnClickListener {
             toggleSettingsMode()
+        }
+
+        fragmentCameraBinding.settingsDimOverlay?.setOnClickListener {
+            if (isSettingsMode) {
+                toggleSettingsMode()
+            }
         }
 
         fragmentCameraBinding.filterToggle?.setOnClickListener {
@@ -548,7 +555,100 @@ class CameraFragment : Fragment() {
 
     private fun toggleSettingsMode() {
         isSettingsMode = !isSettingsMode
+        animateSettingsMenu(isSettingsMode)
         updateSettingsUI()
+    }
+
+    private fun animateSettingsMenu(open: Boolean) {
+        val binding = _fragmentCameraBinding ?: return
+        val panel = binding.settingsPanel ?: return
+        val overlay = binding.settingsDimOverlay ?: return
+        
+        val toggles = listOfNotNull(
+            binding.aspectRatioToggle,
+            binding.modeToggle,
+            binding.filterToggle
+        )
+        
+        isAnimatingSettings = true
+        
+        if (open) {
+            // Cancel any running animations
+            overlay.animate().cancel()
+            toggles.forEach { it.animate().cancel() }
+            
+            // Set initial state
+            overlay.visibility = View.VISIBLE
+            overlay.alpha = 0f
+            overlay.animate()
+                .alpha(1f)
+                .setDuration(250L)
+                .setListener(null)
+                .start()
+                
+            panel.visibility = View.VISIBLE
+            
+            val offset = (-20).dpToPx().toFloat()
+            toggles.forEachIndexed { index, button ->
+                button.alpha = 0f
+                button.scaleX = 0.3f
+                button.scaleY = 0.3f
+                button.translationY = offset
+                
+                button.animate()
+                    .alpha(1f)
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .translationY(0f)
+                    .setDuration(280L)
+                    .setStartDelay(index * 60L)
+                    .setInterpolator(android.view.animation.OvershootInterpolator(1.3f))
+                    .setListener(if (index == toggles.lastIndex) {
+                        object : android.animation.AnimatorListenerAdapter() {
+                            override fun onAnimationEnd(animation: android.animation.Animator) {
+                                isAnimatingSettings = false
+                            }
+                        }
+                    } else null)
+                    .start()
+            }
+        } else {
+            // Cancel any running animations
+            overlay.animate().cancel()
+            toggles.forEach { it.animate().cancel() }
+            
+            overlay.animate()
+                .alpha(0f)
+                .setDuration(250L)
+                .setListener(object : android.animation.AnimatorListenerAdapter() {
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        overlay.visibility = View.GONE
+                    }
+                })
+                .start()
+                
+            val offset = (-20).dpToPx().toFloat()
+            val reversedToggles = toggles.reversed()
+            reversedToggles.forEachIndexed { index, button ->
+                button.animate()
+                    .alpha(0f)
+                    .scaleX(0.3f)
+                    .scaleY(0.3f)
+                    .translationY(offset)
+                    .setDuration(200L)
+                    .setStartDelay(index * 50L)
+                    .setInterpolator(android.view.animation.AccelerateInterpolator())
+                    .setListener(if (index == reversedToggles.lastIndex) {
+                        object : android.animation.AnimatorListenerAdapter() {
+                            override fun onAnimationEnd(animation: android.animation.Animator) {
+                                panel.visibility = View.GONE
+                                isAnimatingSettings = false
+                            }
+                        }
+                    } else null)
+                    .start()
+            }
+        }
     }
 
     private fun updateSettingsUI() {
@@ -565,12 +665,23 @@ class CameraFragment : Fragment() {
         binding.flashToggle?.visibility = View.VISIBLE
         setButtonActiveStyle(binding.flashToggle, true)
         
-        // Aspect ratio, format/mode and filter toggles are shown only in
-        // settings mode, and are always active when visible.
-        val settingsVisibility = if (isSettingsMode) View.VISIBLE else View.GONE
-        binding.aspectRatioToggle?.visibility = settingsVisibility
-        binding.modeToggle?.visibility = settingsVisibility
-        binding.filterToggle?.visibility = settingsVisibility
+        if (!isAnimatingSettings) {
+            binding.settingsPanel?.visibility = if (isSettingsMode) View.VISIBLE else View.GONE
+            binding.settingsDimOverlay?.visibility = if (isSettingsMode) View.VISIBLE else View.GONE
+            
+            if (isSettingsMode) {
+                listOfNotNull(
+                    binding.aspectRatioToggle,
+                    binding.modeToggle,
+                    binding.filterToggle
+                ).forEach { button ->
+                    button.alpha = 1f
+                    button.scaleX = 1f
+                    button.scaleY = 1f
+                    button.translationY = 0f
+                }
+            }
+        }
 
         setButtonActiveStyle(binding.aspectRatioToggle, true)
         setButtonActiveStyle(binding.modeToggle, true)
