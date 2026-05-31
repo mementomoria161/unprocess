@@ -59,6 +59,7 @@ import com.reilandeubank.unprocess.databinding.FragmentCameraBinding
 import com.reilandeubank.unprocess.filter.FilmFilter
 import com.reilandeubank.unprocess.filter.FilmSimulation
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -169,8 +170,13 @@ class CameraFragment : Fragment() {
     private var videoFileDescriptor: android.os.ParcelFileDescriptor? = null
     private var currentVideoFile: File? = null
 
+    private var persistentSurface: Surface? = null
+    private var movieBlinkAnimator: android.animation.ValueAnimator? = null
+    private var isCameraClosed = true
+
     /** Currently selected film simulation. Cycled via the filter toggle. */
     private var filmSimulation: FilmSimulation = FilmSimulation.NORMAL
+    private var savedPhotoFilmSimulation: FilmSimulation = FilmSimulation.NORMAL
 
     private val physicalToLogicalMap = HashMap<String, String>()
 
@@ -213,7 +219,7 @@ class CameraFragment : Fragment() {
         isVideoMode = sharedPrefs.getBoolean("pref_is_video_mode", false)
         
         val savedFilm = sharedPrefs.getString("pref_film_simulation", null)
-        filmSimulation = if (savedFilm != null) {
+        val loadedFilm = if (savedFilm != null) {
             try {
                 FilmSimulation.valueOf(savedFilm)
             } catch (e: Exception) {
@@ -222,9 +228,18 @@ class CameraFragment : Fragment() {
         } else {
             FilmSimulation.NORMAL
         }
+
+        if (isVideoMode) {
+            savedPhotoFilmSimulation = loadedFilm
+            filmSimulation = FilmSimulation.NORMAL
+        } else {
+            filmSimulation = loadedFilm
+            savedPhotoFilmSimulation = loadedFilm
+        }
         
         if (outputFormat == OutputFormat.RAW) {
             filmSimulation = FilmSimulation.NORMAL
+            savedPhotoFilmSimulation = FilmSimulation.NORMAL
         }
 
         currentCameraId = args.cameraId
@@ -246,6 +261,7 @@ class CameraFragment : Fragment() {
             }
             if (outputFormat == OutputFormat.RAW) {
                 filmSimulation = FilmSimulation.NORMAL
+                savedPhotoFilmSimulation = FilmSimulation.NORMAL
             }
             updateModeToggleUI()
             updateSettingsUI()
@@ -255,6 +271,7 @@ class CameraFragment : Fragment() {
         }
 
         fragmentCameraBinding.aspectRatioToggle?.setOnClickListener {
+            if (isRecordingVideo || isProcessing) return@setOnClickListener
             aspectRatio = when (aspectRatio) {
                 AspectRatio.RATIO_4_3 -> AspectRatio.RATIO_16_9
                 AspectRatio.RATIO_16_9 -> AspectRatio.RATIO_1_1
@@ -282,11 +299,25 @@ class CameraFragment : Fragment() {
             // Try to update the existing session if possible
             try {
                 if (::session.isInitialized) {
-                        val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                            addTarget(fragmentCameraBinding.viewFinder.holder.surface)
-                            set(CaptureRequest.CONTROL_AE_MODE, flashMode)
-                            // We don't use TORCH for standard flash toggle, common camera apps use strobe
+                    val template = if (isVideoMode) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW
+                    val captureRequest = camera.createCaptureRequest(template).apply {
+                        addTarget(fragmentCameraBinding.viewFinder.holder.surface)
+                        if (isRecordingVideo && persistentSurface != null) {
+                            addTarget(persistentSurface!!)
                         }
+                        
+                        if (isVideoMode) {
+                            if (flashMode == CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH) {
+                                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                                set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+                            } else {
+                                set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                                set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                            }
+                        } else {
+                            set(CaptureRequest.CONTROL_AE_MODE, flashMode)
+                        }
+                    }
                     session.setRepeatingRequest(captureRequest.build(), null, cameraHandler)
                 } else {
                     initializeCamera()
@@ -297,9 +328,17 @@ class CameraFragment : Fragment() {
             }
         }
 
+        fragmentCameraBinding.movieToggle?.isHapticFeedbackEnabled = false
+        fragmentCameraBinding.movieToggle?.isSoundEffectsEnabled = false
         fragmentCameraBinding.movieToggle?.setOnClickListener {
             if (isRecordingVideo) return@setOnClickListener
             isVideoMode = !isVideoMode
+            if (isVideoMode) {
+                savedPhotoFilmSimulation = filmSimulation
+                filmSimulation = FilmSimulation.NORMAL
+            } else {
+                filmSimulation = savedPhotoFilmSimulation
+            }
             updateSettingsUI()
             updateCaptureButtonForState()
             saveSettings()
@@ -319,7 +358,9 @@ class CameraFragment : Fragment() {
         }
 
         fragmentCameraBinding.filterToggle?.setOnClickListener {
+            if (isVideoMode) return@setOnClickListener
             filmSimulation = filmSimulation.next()
+            savedPhotoFilmSimulation = filmSimulation
             updateFilterUI()
             updateSettingsUI()
             saveSettings()
@@ -711,8 +752,11 @@ class CameraFragment : Fragment() {
         binding.settingsToggle?.setIconResource(R.drawable.ic_settings)
         
         // Settings gear button is highlighted (active) when settings mode is OFF (inactive),
-        // and grayed out (inactive) when settings mode is ON (active)
-        binding.settingsToggle?.let { setButtonActiveStyle(it, !isSettingsMode) }
+        // and grayed out (inactive) when settings mode is ON (active).
+        // Disabled during processing or video recording.
+        val settingsAvailable = !isProcessing && !isRecordingVideo
+        binding.settingsToggle?.isEnabled = settingsAvailable
+        binding.settingsToggle?.let { setButtonActiveStyle(it, !isSettingsMode && settingsAvailable) }
         
         // Flash toggle is always visible and always active
         binding.flashToggle?.visibility = View.VISIBLE
@@ -736,7 +780,9 @@ class CameraFragment : Fragment() {
             }
         }
 
-        setButtonActiveStyle(binding.aspectRatioToggle, true)
+        val aspectAvailable = !isProcessing && !isRecordingVideo
+        binding.aspectRatioToggle?.isEnabled = aspectAvailable
+        setButtonActiveStyle(binding.aspectRatioToggle, aspectAvailable)
 
         // The filter only takes effect on the RAW→Bitmap→JPEG conversion
         // path. In pure RAW (DNG) mode the saved file is just the sensor
@@ -748,7 +794,9 @@ class CameraFragment : Fragment() {
         // captured at shutter press and used through the whole pipeline,
         // letting the user change it mid-flight would be confusing (was
         // the saved image processed with the old or the new filter?).
-        val filterAvailable = !isProcessing && (outputFormat == OutputFormat.JPEG || outputFormat == OutputFormat.WEBP)
+        //
+        // Also disabled during video recording.
+        val filterAvailable = !isProcessing && !isRecordingVideo && !isVideoMode && (outputFormat == OutputFormat.JPEG || outputFormat == OutputFormat.WEBP)
         setButtonActiveStyle(binding.filterToggle, filterAvailable)
         binding.filterToggle?.isEnabled = filterAvailable
 
@@ -796,44 +844,64 @@ class CameraFragment : Fragment() {
             ?: choices.first()
     }
 
-    private fun setupMediaRecorder(videoSize: android.util.Size, rotation: Int) {
-        val filename = "VID_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.mp4"
-        
-        mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            android.media.MediaRecorder(requireContext())
-        } else {
-            @Suppress("DEPRECATION")
-            android.media.MediaRecorder()
+    private fun setupMediaRecorder(videoSize: android.util.Size, rotation: Int, isTemp: Boolean = false) {
+        try {
+            mediaRecorder?.reset()
+            mediaRecorder?.release()
+        } catch (exc: Throwable) {
+            Log.w(TAG, "Failed to reset/release old mediaRecorder: ${exc.message}")
         }
+        mediaRecorder = null
 
-        val resolver = requireContext().contentResolver
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val contentValues = ContentValues().apply {
-                put(MediaStore.Video.Media.DISPLAY_NAME, filename)
-                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-                put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_DCIM}/Camera")
+        if (isTemp) {
+            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                android.media.MediaRecorder(requireContext())
+            } else {
+                @Suppress("DEPRECATION")
+                android.media.MediaRecorder()
             }
-            val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, contentValues)
-                ?: throw IOException("Failed to create MediaStore entry")
-            videoUri = uri
-            val pfd = resolver.openFileDescriptor(uri, "rw") ?: throw IOException("Failed to open file descriptor")
-            videoFileDescriptor = pfd
-            mediaRecorder?.setOutputFile(pfd.fileDescriptor)
-            
-            val dcim = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
-            currentVideoFile = File(File(dcim, "Camera"), filename)
+            val tempFile = File(requireContext().cacheDir, "temp_video.mp4")
+            mediaRecorder?.setOutputFile(tempFile.absolutePath)
         } else {
-            val dcim = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
-            val dir = File(dcim, "Camera").apply { if (!exists()) mkdirs() }
-            val file = File(dir, filename)
-            currentVideoFile = file
-            mediaRecorder?.setOutputFile(file.absolutePath)
+            val filename = "VID_${SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())}.mp4"
+            
+            mediaRecorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                android.media.MediaRecorder(requireContext())
+            } else {
+                @Suppress("DEPRECATION")
+                android.media.MediaRecorder()
+            }
+
+            val resolver = requireContext().contentResolver
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val contentValues = ContentValues().apply {
+                    put(MediaStore.Video.Media.DISPLAY_NAME, filename)
+                    put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+                    put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_DCIM}/Camera")
+                }
+                val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, contentValues)
+                    ?: throw IOException("Failed to create MediaStore entry")
+                videoUri = uri
+                val pfd = resolver.openFileDescriptor(uri, "rw") ?: throw IOException("Failed to open file descriptor")
+                videoFileDescriptor = pfd
+                mediaRecorder?.setOutputFile(pfd.fileDescriptor)
+                
+                val dcim = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+                currentVideoFile = File(File(dcim, "Camera"), filename)
+            } else {
+                val dcim = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM)
+                val dir = File(dcim, "Camera").apply { if (!exists()) mkdirs() }
+                val file = File(dir, filename)
+                currentVideoFile = file
+                mediaRecorder?.setOutputFile(file.absolutePath)
+            }
         }
 
         mediaRecorder?.apply {
             setAudioSource(android.media.MediaRecorder.AudioSource.MIC)
             setVideoSource(android.media.MediaRecorder.VideoSource.SURFACE)
             setOutputFormat(android.media.MediaRecorder.OutputFormat.MPEG_4)
+            setInputSurface(persistentSurface!!)
             setVideoEncoder(android.media.MediaRecorder.VideoEncoder.H264)
             setAudioEncoder(android.media.MediaRecorder.AudioEncoder.AAC)
             setVideoSize(videoSize.width, videoSize.height)
@@ -872,41 +940,82 @@ class CameraFragment : Fragment() {
                 
                 setupMediaRecorder(videoSize, videoRotation)
                 
-                val recorderSurface = mediaRecorder?.surface ?: throw RuntimeException("Recorder surface is null")
-                
-                if (::session.isInitialized) {
-                    session.close()
-                }
-                
-                val targets = listOf(fragmentCameraBinding.viewFinder.holder.surface, recorderSurface)
-                val outputs = targets.map { surface ->
-                    val config = android.hardware.camera2.params.OutputConfiguration(surface)
-                    val logicalParent = physicalToLogicalMap[currentCameraId]
-                    if (logicalParent != null && logicalParent != currentCameraId) {
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                            config.setPhysicalCameraId(currentCameraId)
-                        }
-                    }
-                    config
-                }
-                
-                session = createCaptureSession(camera, outputs, cameraHandler)
-                
+                // Update the repeating request to target both the viewfinder and the persistent surface.
                 val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                     addTarget(fragmentCameraBinding.viewFinder.holder.surface)
-                    addTarget(recorderSurface)
-                    set(CaptureRequest.CONTROL_AE_MODE, flashMode)
+                    addTarget(persistentSurface!!)
+                    if (flashMode == CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH) {
+                        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+                    } else {
+                        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                    }
                 }
                 session.setRepeatingRequest(captureRequest.build(), null, cameraHandler)
                 
                 mediaRecorder?.start()
                 isRecordingVideo = true
                 
+                // Add haptic feedback for record start
+                fragmentCameraBinding.captureButton.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                
+                // Automatically close settings panel if open
+                if (isSettingsMode) {
+                    toggleSettingsMode()
+                }
+                
+                // Start pulsing red for movieToggle
+                movieBlinkAnimator?.cancel()
+                val redColor = getErrorColor()
+                val defaultColor = Color.parseColor("#33FFFFFF")
+                movieBlinkAnimator = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
+                    duration = 3000
+                    repeatMode = android.animation.ValueAnimator.RESTART
+                    repeatCount = android.animation.ValueAnimator.INFINITE
+                    interpolator = android.view.animation.LinearInterpolator()
+                    addUpdateListener { animator ->
+                        val p = animator.animatedValue as Float
+                        
+                        // Custom curve:
+                        // 0% - 40% (p < 0.4): slowly fade in (quadratic ease-in)
+                        // 40% - 70% (0.4 <= p <= 0.7): hold at 1.0 (strong red)
+                        // 70% - 100% (p > 0.7): slowly fade out (quadratic ease-out)
+                        val intensity = when {
+                            p < 0.4f -> {
+                                val ratio = p / 0.4f
+                                ratio * ratio
+                            }
+                            p <= 0.7f -> 1.0f
+                            else -> {
+                                val ratio = (1.0f - p) / 0.3f
+                                ratio * ratio
+                            }
+                        }
+
+                        val color = android.animation.ArgbEvaluator().evaluate(
+                            intensity,
+                            defaultColor,
+                            redColor
+                        ) as Int
+                        val iconColor = android.animation.ArgbEvaluator().evaluate(
+                            intensity,
+                            Color.GRAY,
+                            Color.WHITE
+                        ) as Int
+                        
+                        _fragmentCameraBinding?.movieToggle?.let { button ->
+                            button.backgroundTintList = ColorStateList.valueOf(color)
+                            button.iconTint = ColorStateList.valueOf(iconColor)
+                        }
+                    }
+                    start()
+                }
+                
                 updateCaptureButtonForState()
                 fragmentCameraBinding.captureButton.isEnabled = true
                 
-                fragmentCameraBinding.movieToggle?.isEnabled = false
-                fragmentCameraBinding.settingsToggle?.isEnabled = false
+                updateSettingsUI()
                 fragmentCameraBinding.galleryButton?.isEnabled = false
                 val lensContainer = fragmentCameraBinding.lensSelectorContainer
                 for (i in 0 until (lensContainer?.childCount ?: 0)) {
@@ -928,8 +1037,22 @@ class CameraFragment : Fragment() {
                 _fragmentCameraBinding?.captureButton?.isEnabled = false
                 setProcessing(true)
                 
+                // Add haptic feedback for record stop
+                _fragmentCameraBinding?.captureButton?.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
+                
                 try {
                     mediaRecorder?.stop()
+                    
+                    // Stop sending frames to persistent surface
+                    if (::session.isInitialized && _fragmentCameraBinding != null) {
+                        val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                            addTarget(_fragmentCameraBinding!!.viewFinder.holder.surface)
+                            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                            set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                        }
+                        session.setRepeatingRequest(captureRequest.build(), null, cameraHandler)
+                    }
+                    
                     _fragmentCameraBinding?.viewFinder?.post(shutterFlashTask)
                 } catch (exc: RuntimeException) {
                     Log.e(TAG, "RuntimeException stopping MediaRecorder: dynamic check, might be too short", exc)
@@ -959,9 +1082,6 @@ class CameraFragment : Fragment() {
                             }
                         }
                     }
-                    context?.let { ctx ->
-                        Toast.makeText(ctx, "Video saved", Toast.LENGTH_SHORT).show()
-                    }
                 }
                 
                 // Add a small delay so the user clearly sees the "Developing..." state feedback
@@ -970,18 +1090,15 @@ class CameraFragment : Fragment() {
                 Log.e(TAG, "Failed to stop video recording", exc)
             } finally {
                 setProcessing(false)
+                movieBlinkAnimator?.cancel()
+                movieBlinkAnimator = null
                 updateCaptureButtonForState()
                 if (_fragmentCameraBinding != null) {
                     reEnableUI()
                 }
                 
-                _fragmentCameraBinding?.movieToggle?.isEnabled = true
-                _fragmentCameraBinding?.settingsToggle?.isEnabled = true
+                updateSettingsUI()
                 _fragmentCameraBinding?.galleryButton?.isEnabled = true
-                
-                if (_fragmentCameraBinding != null && isAdded) {
-                    initializeCamera()
-                }
             }
         }
     }
@@ -1000,6 +1117,16 @@ class CameraFragment : Fragment() {
             typedValue.data
         } else {
             ContextCompat.getColor(requireContext(), R.color.primary)
+        }
+    }
+
+    private fun getErrorColor(): Int {
+        val typedValue = android.util.TypedValue()
+        val theme = requireContext().theme
+        return if (theme.resolveAttribute(com.google.android.material.R.attr.colorError, typedValue, true)) {
+            typedValue.data
+        } else {
+            Color.parseColor("#E53935")
         }
     }
 
@@ -1221,6 +1348,8 @@ class CameraFragment : Fragment() {
     }
 
     private fun releaseResources() {
+        movieBlinkAnimator?.cancel()
+        movieBlinkAnimator = null
         if (isRecordingVideo) {
             try {
                 mediaRecorder?.stop()
@@ -1241,11 +1370,23 @@ class CameraFragment : Fragment() {
         }
         mediaRecorder = null
         try {
+            context?.cacheDir?.let { cacheDir ->
+                val tempFile = File(cacheDir, "temp_video.mp4")
+                if (tempFile.exists()) {
+                    tempFile.delete()
+                }
+            }
+        } catch (exc: Throwable) {
+            Log.w(TAG, "Failed to delete temp video file: ${exc.message}")
+        }
+        try {
             videoFileDescriptor?.close()
         } catch (exc: Throwable) {
             Log.w(TAG, "videoFileDescriptor close failed: ${exc.message}")
         }
         videoFileDescriptor = null
+        persistentSurface?.release()
+        persistentSurface = null
 
         // Close each resource independently so a failure in one doesn't skip the others.
         if (::session.isInitialized) {
@@ -1260,6 +1401,7 @@ class CameraFragment : Fragment() {
             try { camera.close() } catch (exc: Throwable) {
                 Log.w(TAG, "camera.close failed: ${exc.message}")
             }
+            isCameraClosed = true
         }
         if (::imageReader.isInitialized) {
             try { imageReader.close() } catch (exc: Throwable) {
@@ -1374,6 +1516,10 @@ class CameraFragment : Fragment() {
     private fun initializeCamera() {
         cameraJob?.cancel()
         
+        _fragmentCameraBinding?.overlay?.animate()?.cancel()
+        _fragmentCameraBinding?.overlay?.setBackgroundColor(Color.TRANSPARENT)
+        _fragmentCameraBinding?.overlay?.alpha = 0f
+        
         // Disable UI during initialization (lens buttons too, so the user can't
         // bounce between lenses faster than the camera service can re-open).
         fragmentCameraBinding.captureButton.isEnabled = false
@@ -1385,25 +1531,47 @@ class CameraFragment : Fragment() {
         cameraJob = lifecycleScope.launch(Dispatchers.Main) {
             var initialized = false
             try {
-                // Release existing resources before opening a new camera
-                releaseResources()
-                
-                // Wait a bit for the system to settle
-                kotlinx.coroutines.delay(250)
-
-                // Open the logical camera parent (or the camera itself if it is logical)
                 val cameraToOpen = physicalToLogicalMap[currentCameraId] ?: currentCameraId
-                try {
-                    camera = openCamera(cameraManager, cameraToOpen, cameraHandler)
-                } catch (exc: Exception) {
-                    Log.e(TAG, "Failed to open camera $cameraToOpen, trying fallback", exc)
-                    val fallbackId = physicalToLogicalMap[currentCameraId]
-                    if (fallbackId != null && fallbackId != currentCameraId) {
-                        currentCameraId = fallbackId
-                        camera = openCamera(cameraManager, currentCameraId, cameraHandler)
-                        updateLensHighlight()
-                    } else {
-                        throw exc
+                val needsReopen = isCameraClosed || !::camera.isInitialized || camera.id != cameraToOpen
+                
+                if (needsReopen) {
+                    // Release existing resources before opening a new camera
+                    releaseResources()
+                    
+                    // Wait a bit for the system to settle
+                    kotlinx.coroutines.delay(250)
+                    
+                    if (isVideoMode && persistentSurface == null) {
+                        persistentSurface = android.media.MediaCodec.createPersistentInputSurface()
+                    }
+                    
+                    try {
+                        camera = openCamera(cameraManager, cameraToOpen, cameraHandler)
+                    } catch (exc: Exception) {
+                        Log.e(TAG, "Failed to open camera $cameraToOpen, trying fallback", exc)
+                        val fallbackId = physicalToLogicalMap[currentCameraId]
+                        if (fallbackId != null && fallbackId != currentCameraId) {
+                            currentCameraId = fallbackId
+                            camera = openCamera(cameraManager, currentCameraId, cameraHandler)
+                            updateLensHighlight()
+                        } else {
+                            throw exc
+                        }
+                    }
+                } else {
+                    // Close the session and imageReader, but keep the camera device open!
+                    if (::session.isInitialized) {
+                        try { session.stopRepeating() } catch (exc: Throwable) {}
+                        try { session.close() } catch (exc: Throwable) {}
+                    }
+                    if (::imageReader.isInitialized) {
+                        try { imageReader.close() } catch (exc: Throwable) {}
+                    }
+                    
+                    persistentSurface?.release()
+                    persistentSurface = null
+                    if (isVideoMode) {
+                        persistentSurface = android.media.MediaCodec.createPersistentInputSurface()
                     }
                 }
 
@@ -1421,6 +1589,19 @@ class CameraFragment : Fragment() {
                 val previewSize = if (isVideoMode) {
                     val videoSizes = streamMap.getOutputSizes(android.media.MediaRecorder::class.java)
                     val videoSize = chooseVideoSize(videoSizes)
+                    
+                    val deviceCw = relativeOrientation.value ?: when (
+                        fragmentCameraBinding.viewFinder.display?.rotation ?: Surface.ROTATION_0
+                    ) {
+                        Surface.ROTATION_0 -> 0
+                        Surface.ROTATION_90 -> 90
+                        Surface.ROTATION_180 -> 180
+                        Surface.ROTATION_270 -> 270
+                        else -> 0
+                    }
+                    val videoRotation = computeJpegOrientation(characteristics, deviceCw)
+                    setupMediaRecorder(videoSize, videoRotation, isTemp = true)
+
                     val captureRatio = videoSize.width.toFloat() / videoSize.height.toFloat()
                     getPreviewOutputSize(
                         fragmentCameraBinding.viewFinder.display,
@@ -1501,7 +1682,7 @@ class CameraFragment : Fragment() {
 
                 // Creates list of Surfaces where the camera will output frames
                 val targets = if (isVideoMode) {
-                    listOf(fragmentCameraBinding.viewFinder.holder.surface)
+                    listOf(fragmentCameraBinding.viewFinder.holder.surface, persistentSurface!!)
                 } else {
                     listOf(fragmentCameraBinding.viewFinder.holder.surface, imageReader.surface)
                 }
@@ -1524,7 +1705,12 @@ class CameraFragment : Fragment() {
                 val template = if (isVideoMode) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW
                 val captureRequest = camera.createCaptureRequest(template).apply { 
                     addTarget(fragmentCameraBinding.viewFinder.holder.surface)
-                    set(CaptureRequest.CONTROL_AE_MODE, flashMode)
+                    if (isVideoMode) {
+                        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                        set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                    } else {
+                        set(CaptureRequest.CONTROL_AE_MODE, flashMode)
+                    }
                 }
 
                 // This will keep sending the capture request as frequently as possible until the
@@ -1678,14 +1864,20 @@ class CameraFragment : Fragment() {
     ): CameraDevice = suspendCancellableCoroutine { cont ->
         try {
             manager.openCamera(cameraId, object : CameraDevice.StateCallback() {
-                override fun onOpened(device: CameraDevice) = cont.resume(device)
+                override fun onOpened(device: CameraDevice) {
+                    isCameraClosed = false
+                    cont.resume(device)
+                }
 
                 override fun onDisconnected(device: CameraDevice) {
                     Log.w(TAG, "Camera $cameraId has been disconnected")
-                    // Do not finish activity, just warn
+                    isCameraClosed = true
+                    device.close()
                 }
 
                 override fun onError(device: CameraDevice, error: Int) {
+                    isCameraClosed = true
+                    device.close()
                     val msg = when (error) {
                         ERROR_CAMERA_DEVICE -> "Fatal (device)"
                         ERROR_CAMERA_DISABLED -> "Device policy"
@@ -2208,6 +2400,10 @@ class CameraFragment : Fragment() {
         doneThumbnail = null
         frozenThumbnail?.takeIf { !it.isRecycled }?.recycle()
         frozenThumbnail = null
+        persistentSurface?.release()
+        persistentSurface = null
+        movieBlinkAnimator?.cancel()
+        movieBlinkAnimator = null
         _fragmentCameraBinding = null
         super.onDestroyView()
     }
