@@ -368,8 +368,16 @@ class CameraFragment : Fragment() {
 
         val navOffsetListener = androidx.core.view.OnApplyWindowInsetsListener { v, insets ->
             val systemBars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
-            v.translationX = (-systemBars.right).toFloat()
-            v.translationY = (-systemBars.bottom).toFloat()
+            val lp = v.layoutParams as? ViewGroup.MarginLayoutParams
+            if (lp != null) {
+                if (v.id == R.id.gallery_button) {
+                    lp.bottomMargin = 48.dpToPx() + systemBars.bottom
+                    v.layoutParams = lp
+                } else if (v.id == R.id.capture_button) {
+                    lp.marginEnd = 32.dpToPx() + systemBars.right
+                    v.layoutParams = lp
+                }
+            }
             androidx.core.view.WindowInsetsCompat.CONSUMED
         }
         androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(fragmentCameraBinding.captureButton, navOffsetListener)
@@ -1017,10 +1025,6 @@ class CameraFragment : Fragment() {
                 
                 updateSettingsUI()
                 fragmentCameraBinding.galleryButton?.isEnabled = false
-                val lensContainer = fragmentCameraBinding.lensSelectorContainer
-                for (i in 0 until (lensContainer?.childCount ?: 0)) {
-                    lensContainer?.getChildAt(i)?.isEnabled = false
-                }
             } catch (exc: Exception) {
                 Log.e(TAG, "Failed to start video recording", exc)
                 Toast.makeText(requireContext(), "Failed to start recording: ${exc.message}", Toast.LENGTH_SHORT).show()
@@ -1150,16 +1154,16 @@ class CameraFragment : Fragment() {
             val streamMap = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
             if (streamMap != null) {
                 val needsSwap = (sensorOrientation == 90 || sensorOrientation == 270)
-                val ratio = when (aspectRatio) {
-                    AspectRatio.RATIO_1_1 -> "1:1"
-                    AspectRatio.RATIO_16_9 -> if (needsSwap) "9:16" else "16:9"
+                val (targetW, targetH) = when (aspectRatio) {
+                    AspectRatio.RATIO_1_1 -> Pair(1, 1)
+                    AspectRatio.RATIO_16_9 -> if (needsSwap) Pair(9, 16) else Pair(16, 9)
                     AspectRatio.RATIO_4_3 -> {
                         if (isVideoMode) {
                             val videoSizes = streamMap.getOutputSizes(android.media.MediaRecorder::class.java)
                             val videoSize = chooseVideoSize(videoSizes)
                             val displayWidth = if (needsSwap) videoSize.height else videoSize.width
                             val displayHeight = if (needsSwap) videoSize.width else videoSize.height
-                            "$displayWidth:$displayHeight"
+                            Pair(displayWidth, displayHeight)
                         } else {
                             val supportedSizes = streamMap.getOutputSizes(args.pixelFormat)
                             val format = if (supportedSizes.isNullOrEmpty()) ImageFormat.JPEG else args.pixelFormat
@@ -1168,17 +1172,35 @@ class CameraFragment : Fragment() {
                             if (size != null) {
                                 val displayWidth = if (needsSwap) size.height else size.width
                                 val displayHeight = if (needsSwap) size.width else size.height
-                                "$displayWidth:$displayHeight"
+                                Pair(displayWidth, displayHeight)
                             } else {
-                                if (needsSwap) "3:4" else "4:3"
+                                if (needsSwap) Pair(3, 4) else Pair(4, 3)
                             }
                         }
                     }
                 }
 
+                val insets = androidx.core.view.ViewCompat.getRootWindowInsets(fragmentCameraBinding.root)
+                val systemBars = insets?.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+                val bottomInset = systemBars?.bottom ?: 0
+                val wMax = maxOf(1, resources.displayMetrics.widthPixels - 32.dpToPx())
+                val hMax = maxOf(1, resources.displayMetrics.heightPixels - 311.dpToPx() - bottomInset)
+                val availableRatio = wMax.toFloat() / hMax.toFloat()
+                val targetRatio = targetW.toFloat() / targetH.toFloat()
+
+                val ratio = if (targetRatio > availableRatio) {
+                    "H,$targetW:$targetH"
+                } else {
+                    "W,$targetW:$targetH"
+                }
+
+                Log.d(TAG, "updateViewfinderRatio | container=$ratio (target=$targetW:$targetH, availableRatio=$availableRatio, targetRatio=$targetRatio)")
+
                 val constraintSet = androidx.constraintlayout.widget.ConstraintSet()
                 constraintSet.clone(fragmentCameraBinding.root as androidx.constraintlayout.widget.ConstraintLayout)
                 constraintSet.setDimensionRatio(R.id.view_finder_container, ratio)
+                constraintSet.constrainedWidth(R.id.view_finder_container, true)
+                constraintSet.constrainedHeight(R.id.view_finder_container, true)
                 constraintSet.applyTo(fragmentCameraBinding.root as androidx.constraintlayout.widget.ConstraintLayout)
             }
         } catch (e: Exception) {
@@ -1410,6 +1432,20 @@ class CameraFragment : Fragment() {
         }
     }
 
+    private fun closeCameraAndSession() {
+        if (::session.isInitialized) {
+            try { session.stopRepeating() } catch (exc: Throwable) {}
+            try { session.close() } catch (exc: Throwable) {}
+        }
+        if (::camera.isInitialized) {
+            try { camera.close() } catch (exc: Throwable) {}
+            isCameraClosed = true
+        }
+        if (::imageReader.isInitialized) {
+            try { imageReader.close() } catch (exc: Throwable) {}
+        }
+    }
+
     private fun reEnableUI() {
         fragmentCameraBinding.captureButton.isEnabled = true
         val count = fragmentCameraBinding.lensSelectorContainer?.childCount ?: 0
@@ -1535,8 +1571,13 @@ class CameraFragment : Fragment() {
                 val needsReopen = isCameraClosed || !::camera.isInitialized || camera.id != cameraToOpen
                 
                 if (needsReopen) {
-                    // Release existing resources before opening a new camera
-                    releaseResources()
+                    // Release existing resources before opening a new camera.
+                    // If we are recording video, we must NOT release the mediaRecorder or persistentSurface.
+                    if (isRecordingVideo) {
+                        closeCameraAndSession()
+                    } else {
+                        releaseResources()
+                    }
                     
                     // Wait a bit for the system to settle
                     kotlinx.coroutines.delay(250)
@@ -1568,10 +1609,12 @@ class CameraFragment : Fragment() {
                         try { imageReader.close() } catch (exc: Throwable) {}
                     }
                     
-                    persistentSurface?.release()
-                    persistentSurface = null
-                    if (isVideoMode) {
-                        persistentSurface = android.media.MediaCodec.createPersistentInputSurface()
+                    if (!isRecordingVideo) {
+                        persistentSurface?.release()
+                        persistentSurface = null
+                        if (isVideoMode) {
+                            persistentSurface = android.media.MediaCodec.createPersistentInputSurface()
+                        }
                     }
                 }
 
@@ -1600,7 +1643,9 @@ class CameraFragment : Fragment() {
                         else -> 0
                     }
                     val videoRotation = computeJpegOrientation(characteristics, deviceCw)
-                    setupMediaRecorder(videoSize, videoRotation, isTemp = true)
+                    if (!isRecordingVideo) {
+                        setupMediaRecorder(videoSize, videoRotation, isTemp = true)
+                    }
 
                     val captureRatio = videoSize.width.toFloat() / videoSize.height.toFloat()
                     getPreviewOutputSize(
@@ -1655,30 +1700,17 @@ class CameraFragment : Fragment() {
                 fragmentCameraBinding.viewFinder.setAspectRatio(displayWidth, displayHeight)
                 fragmentCameraBinding.viewFinder.setBufferSize(previewSize.width, previewSize.height)
 
-                val needsSwapRatio = (sensorOrientation == 90 || sensorOrientation == 270)
-                val ratio = when (aspectRatio) {
-                    AspectRatio.RATIO_1_1 -> "1:1"
-                    AspectRatio.RATIO_16_9 -> if (needsSwapRatio) "9:16" else "16:9"
-                    AspectRatio.RATIO_4_3 -> {
-                        if (isVideoMode) {
-                            val videoSizes = streamMap.getOutputSizes(android.media.MediaRecorder::class.java)
-                            val videoSize = chooseVideoSize(videoSizes)
-                            val displayWidthRatio = if (needsSwapRatio) videoSize.height else videoSize.width
-                            val displayHeightRatio = if (needsSwapRatio) videoSize.width else videoSize.height
-                            "$displayWidthRatio:$displayHeightRatio"
-                        } else {
-                            "$displayWidth:$displayHeight"
-                        }
-                    }
-                }
+                // Update viewfinder aspect ratio constraints.
+                updateViewfinderRatio()
+
                 val facingFrontPreview = characteristics.get(CameraCharacteristics.LENS_FACING) ==
                         CameraCharacteristics.LENS_FACING_FRONT
-                Log.d(TAG, "PREVIEW DIAG | camera=$currentCameraId facing=${if (facingFrontPreview) "FRONT" else "BACK"} sensor=${sensorOrientation}° deviceDisplay=${deviceRotation}° swap=$needsSwap | buffer=${previewSize.width}x${previewSize.height} viewAspect=$displayWidth:$displayHeight container=$ratio")
+                Log.d(TAG, "PREVIEW DIAG | camera=$currentCameraId facing=${if (facingFrontPreview) "FRONT" else "BACK"} sensor=${sensorOrientation}° deviceDisplay=${deviceRotation}° swap=$needsSwap | buffer=${previewSize.width}x${previewSize.height} viewAspect=$displayWidth:$displayHeight")
 
-                val constraintSet = androidx.constraintlayout.widget.ConstraintSet()
-                constraintSet.clone(fragmentCameraBinding.root as androidx.constraintlayout.widget.ConstraintLayout)
-                constraintSet.setDimensionRatio(R.id.view_finder_container, ratio)
-                constraintSet.applyTo(fragmentCameraBinding.root as androidx.constraintlayout.widget.ConstraintLayout)
+                if (!needsReopen) {
+                    // Yield the main thread to let the layout pass complete and surface resize
+                    kotlinx.coroutines.delay(250)
+                }
 
                 // Creates list of Surfaces where the camera will output frames
                 val targets = if (isVideoMode) {
@@ -1705,9 +1737,18 @@ class CameraFragment : Fragment() {
                 val template = if (isVideoMode) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW
                 val captureRequest = camera.createCaptureRequest(template).apply { 
                     addTarget(fragmentCameraBinding.viewFinder.holder.surface)
+                    if (isRecordingVideo && persistentSurface != null) {
+                        addTarget(persistentSurface!!)
+                    }
+                    
                     if (isVideoMode) {
-                        set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
-                        set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                        if (flashMode == CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH) {
+                            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                            set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_TORCH)
+                        } else {
+                            set(CaptureRequest.CONTROL_AE_MODE, CaptureRequest.CONTROL_AE_MODE_ON)
+                            set(CaptureRequest.FLASH_MODE, CaptureRequest.FLASH_MODE_OFF)
+                        }
                     } else {
                         set(CaptureRequest.CONTROL_AE_MODE, flashMode)
                     }

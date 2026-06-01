@@ -20,7 +20,9 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="#1A1A1A">
+    android:background="#1A1A1A"
+    android:clipChildren="false"
+    android:clipToPadding="false">
 
     <com.google.android.material.card.MaterialCardView
         android:id="@+id/view_finder_container"
@@ -30,6 +32,8 @@
         app:cardElevation="0dp"
         app:strokeWidth="0dp"
         android:clipToOutline="true"
+        app:layout_constrainedWidth="true"
+        app:layout_constrainedHeight="true"
         app:layout_constraintTop_toBottomOf="@+id/top_controls"
         app:layout_constraintBottom_toTopOf="@+id/gallery_button"
         app:layout_constraintStart_toStartOf="parent"
@@ -236,6 +240,8 @@
         android:orientation="vertical"
         android:gravity="end"
         android:visibility="gone"
+        android:clipChildren="false"
+        android:clipToPadding="false"
         app:layout_constraintTop_toBottomOf="@+id/top_controls"
         app:layout_constraintEnd_toEndOf="@+id/top_controls"
         android:layout_marginTop="16dp">
