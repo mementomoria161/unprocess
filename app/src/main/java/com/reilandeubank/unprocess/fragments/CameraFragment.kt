@@ -58,6 +58,7 @@ import com.reilandeubank.unprocess.R
 import com.reilandeubank.unprocess.databinding.FragmentCameraBinding
 import com.reilandeubank.unprocess.filter.FilmFilter
 import com.reilandeubank.unprocess.filter.FilmSimulation
+import com.reilandeubank.unprocess.filter.Super8Renderer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -166,6 +167,19 @@ class CameraFragment : Fragment() {
     private var videoResolution: VideoResolution = VideoResolution.MAX
     private var videoFrameRate: Int = 30
 
+    /** Video looks. NORMAL is the direct (unprocessed) pipeline; SUPER8 routes
+     *  the camera through [Super8Renderer] for a procedural Super-8 film look. */
+    private enum class VideoPreset { NORMAL, SUPER8 }
+    private var videoPreset: VideoPreset = VideoPreset.NORMAL
+
+    /** GL pipeline used only in SUPER8 video mode; null otherwise. */
+    private var super8Renderer: Super8Renderer? = null
+
+    /** "Remaining film reel" countdown state (SUPER8 recording only). */
+    private var reelHandler: Handler? = null
+    private var reelRunnable: Runnable? = null
+    private var reelStartElapsed: Long = 0L
+
     private var isSettingsMode = false
     private var isAnimatingSettings = false
     private var isCameraInitializing = false
@@ -241,7 +255,18 @@ class CameraFragment : Fragment() {
         } catch (e: Exception) {
             VideoResolution.MAX
         }
-        
+
+        val savedPreset = sharedPrefs.getString("pref_video_preset", VideoPreset.NORMAL.name)
+        videoPreset = try {
+            VideoPreset.valueOf(savedPreset ?: VideoPreset.NORMAL.name)
+        } catch (e: Exception) {
+            VideoPreset.NORMAL
+        }
+        // Super-8 is defined by its 18 fps silent-film cadence — lock it in.
+        if (videoPreset == VideoPreset.SUPER8) {
+            videoFrameRate = 18
+        }
+
         val savedFilm = sharedPrefs.getString("pref_film_simulation", null)
         val loadedFilm = if (savedFilm != null) {
             try {
@@ -357,11 +382,15 @@ class CameraFragment : Fragment() {
                 if (::session.isInitialized) {
                     val template = if (isVideoMode) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW
                     val captureRequest = camera.createCaptureRequest(template).apply {
-                        addTarget(fragmentCameraBinding.viewFinder.holder.surface)
-                        if (isRecordingVideo && persistentSurface != null) {
-                            addTarget(persistentSurface!!)
+                        if (isSuper8() && super8Renderer != null) {
+                            addTarget(super8Renderer!!.inputSurface)
+                        } else {
+                            addTarget(fragmentCameraBinding.viewFinder.holder.surface)
+                            if (isRecordingVideo && persistentSurface != null) {
+                                addTarget(persistentSurface!!)
+                            }
                         }
-                        
+
                         applyCaptureRequestSettings(this)
                     }
                     session.setRepeatingRequest(captureRequest.build(), null, cameraHandler)
@@ -383,6 +412,9 @@ class CameraFragment : Fragment() {
                 savedPhotoFilmSimulation = filmSimulation
                 filmSimulation = FilmSimulation.NORMAL
                 aspectRatio = videoAspectRatio
+                if (videoPreset == VideoPreset.SUPER8) {
+                    videoFrameRate = 18
+                }
             } else {
                 filmSimulation = savedPhotoFilmSimulation
                 aspectRatio = photoAspectRatio
@@ -412,6 +444,26 @@ class CameraFragment : Fragment() {
             updateFilterUI()
             updateSettingsUI()
             saveSettings()
+        }
+
+        fragmentCameraBinding.presetToggle?.setOnClickListener {
+            if (isRecordingVideo || isProcessing || !isVideoMode) return@setOnClickListener
+            videoPreset = when (videoPreset) {
+                VideoPreset.NORMAL -> VideoPreset.SUPER8
+                VideoPreset.SUPER8 -> VideoPreset.NORMAL
+            }
+            // Super-8 forces 18 fps; leaving it restores a sensible default.
+            if (videoPreset == VideoPreset.SUPER8) {
+                videoFrameRate = 18
+            } else if (videoFrameRate == 18) {
+                videoFrameRate = if (30 in getSupportedVideoFramerates()) 30 else getSupportedVideoFramerates().firstOrNull() ?: 30
+            }
+            updateSettingsUI()
+            saveSettings()
+            // The pipeline differs between presets — rebuild the session.
+            if (!isShowingDone) {
+                initializeCamera()
+            }
         }
 
         val navOffsetListener = androidx.core.view.OnApplyWindowInsetsListener { v, insets ->
@@ -720,6 +772,7 @@ class CameraFragment : Fragment() {
             binding.aspectRatioToggle,
             binding.resolutionToggle,
             binding.framerateToggle,
+            binding.presetToggle,
             binding.modeToggle,
             binding.filterToggle
         ).filter { it.visibility == View.VISIBLE }
@@ -836,10 +889,16 @@ class CameraFragment : Fragment() {
             binding.modeToggle?.visibility = View.GONE
             binding.resolutionToggle?.visibility = View.VISIBLE
             binding.framerateToggle?.visibility = View.VISIBLE
+            binding.presetToggle?.visibility = View.VISIBLE
+            // The film-simulation filter is a photo-only control; in video the
+            // preset toggle takes its place.
+            binding.filterToggle?.visibility = View.GONE
         } else {
             binding.modeToggle?.visibility = View.VISIBLE
             binding.resolutionToggle?.visibility = View.GONE
             binding.framerateToggle?.visibility = View.GONE
+            binding.presetToggle?.visibility = View.GONE
+            binding.filterToggle?.visibility = View.VISIBLE
         }
         
         if (!isAnimatingSettings) {
@@ -851,6 +910,7 @@ class CameraFragment : Fragment() {
                     binding.aspectRatioToggle,
                     binding.resolutionToggle,
                     binding.framerateToggle,
+                    binding.presetToggle,
                     binding.modeToggle,
                     binding.filterToggle
                 ).forEach { button ->
@@ -869,9 +929,19 @@ class CameraFragment : Fragment() {
         val videoSettingsAvailable = !isProcessing && !isRecordingVideo && isVideoMode
         binding.resolutionToggle?.isEnabled = videoSettingsAvailable
         setButtonActiveStyle(binding.resolutionToggle, videoSettingsAvailable)
-        
-        binding.framerateToggle?.isEnabled = videoSettingsAvailable
-        setButtonActiveStyle(binding.framerateToggle, videoSettingsAvailable)
+
+        // Super-8 locks the frame rate to its signature 18 fps, so the
+        // framerate toggle is disabled while that preset is active.
+        val framerateAvailable = videoSettingsAvailable && videoPreset == VideoPreset.NORMAL
+        binding.framerateToggle?.isEnabled = framerateAvailable
+        setButtonActiveStyle(binding.framerateToggle, framerateAvailable)
+
+        binding.presetToggle?.isEnabled = videoSettingsAvailable
+        setButtonActiveStyle(binding.presetToggle, videoSettingsAvailable)
+        binding.presetToggle?.text = when (videoPreset) {
+            VideoPreset.NORMAL -> getString(R.string.preset_normal)
+            VideoPreset.SUPER8 -> getString(R.string.preset_super8)
+        }
 
         // The filter only takes effect on the RAW→Bitmap→JPEG conversion
         // path. In pure RAW (DNG) mode the saved file is just the sensor
@@ -977,6 +1047,34 @@ class CameraFragment : Fragment() {
         return listOf(18, 24, 30, 60)
     }
 
+    /** True when the SUPER8 GL pipeline should be active. */
+    private fun isSuper8(): Boolean = isVideoMode && videoPreset == VideoPreset.SUPER8
+
+    /**
+     * Camera2 exposure shaping for the Super-8 look. We keep auto-exposure on
+     * for robustness across devices/lighting, but bias it slightly dense
+     * (negative EV) for a filmic feel and steer white balance toward daylight
+     * so the shader's warm grade reads as film, not as a colour cast. The
+     * 18 fps target range (applied in [applyCaptureRequestSettings]) also caps
+     * the shutter, adding natural motion blur like a real Super-8 gate.
+     */
+    private fun applySuper8Exposure(builder: CaptureRequest.Builder) {
+        try {
+            val range = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_RANGE)
+            val step = characteristics.get(CameraCharacteristics.CONTROL_AE_COMPENSATION_STEP)
+            if (range != null && step != null && step.toFloat() > 0f) {
+                val desiredEv = -0.7f
+                val steps = (desiredEv / step.toFloat()).toInt()
+                builder.set(
+                    CaptureRequest.CONTROL_AE_EXPOSURE_COMPENSATION,
+                    steps.coerceIn(range.lower, range.upper),
+                )
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to apply Super8 exposure settings", e)
+        }
+    }
+
     private fun chooseFpsRange(): android.util.Range<Int>? {
         val fpsRanges = characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES) ?: return null
         val target = videoFrameRate
@@ -1002,6 +1100,9 @@ class CameraFragment : Fragment() {
             val fpsRange = chooseFpsRange()
             if (fpsRange != null) {
                 builder.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fpsRange)
+            }
+            if (isSuper8()) {
+                applySuper8Exposure(builder)
             }
         } else {
             builder.set(CaptureRequest.CONTROL_AE_MODE, flashMode)
@@ -1192,17 +1293,30 @@ class CameraFragment : Fragment() {
                 val videoRotation = computeJpegOrientation(characteristics, deviceCw)
                 
                 setupMediaRecorder(videoSize, videoRotation)
-                
-                // Update the repeating request to target both the viewfinder and the persistent surface.
-                val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                    addTarget(fragmentCameraBinding.viewFinder.holder.surface)
-                    addTarget(persistentSurface!!)
-                    applyCaptureRequestSettings(this)
+
+                if (isSuper8()) {
+                    // The camera already feeds the renderer's input surface; we
+                    // just start the encoder and hand its input surface to the
+                    // renderer so it begins drawing the graded frames into it.
+                    mediaRecorder?.start()
+                    super8Renderer?.setEncoder(persistentSurface)
+                } else {
+                    // Update the repeating request to target both the viewfinder and the persistent surface.
+                    val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                        addTarget(fragmentCameraBinding.viewFinder.holder.surface)
+                        addTarget(persistentSurface!!)
+                        applyCaptureRequestSettings(this)
+                    }
+                    session.setRepeatingRequest(captureRequest.build(), null, cameraHandler)
+
+                    mediaRecorder?.start()
                 }
-                session.setRepeatingRequest(captureRequest.build(), null, cameraHandler)
-                
-                mediaRecorder?.start()
                 isRecordingVideo = true
+
+                // SUPER8 clips are limited to a 200 s "film reel" with a live countdown.
+                if (isSuper8()) {
+                    startReelCountdown()
+                }
                 
                 // Add haptic feedback for record start
                 fragmentCameraBinding.captureButton.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
@@ -1282,19 +1396,30 @@ class CameraFragment : Fragment() {
                 
                 // Add haptic feedback for record stop
                 _fragmentCameraBinding?.captureButton?.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
-                
+
+                // Stop the film-reel countdown (no-op outside SUPER8).
+                stopReelCountdown()
+
                 try {
-                    mediaRecorder?.stop()
-                    
-                    // Stop sending frames to persistent surface
-                    if (::session.isInitialized && _fragmentCameraBinding != null) {
-                        val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                            addTarget(_fragmentCameraBinding!!.viewFinder.holder.surface)
-                            applyCaptureRequestSettings(this)
+                    if (isSuper8()) {
+                        // Detach the encoder surface from the renderer first so no
+                        // more frames are submitted, then finalise the file. The
+                        // camera keeps feeding the preview untouched.
+                        super8Renderer?.setEncoder(null)
+                        mediaRecorder?.stop()
+                    } else {
+                        mediaRecorder?.stop()
+
+                        // Stop sending frames to persistent surface
+                        if (::session.isInitialized && _fragmentCameraBinding != null) {
+                            val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                                addTarget(_fragmentCameraBinding!!.viewFinder.holder.surface)
+                                applyCaptureRequestSettings(this)
+                            }
+                            session.setRepeatingRequest(captureRequest.build(), null, cameraHandler)
                         }
-                        session.setRepeatingRequest(captureRequest.build(), null, cameraHandler)
                     }
-                    
+
                     _fragmentCameraBinding?.viewFinder?.post(shutterFlashTask)
                 } catch (exc: RuntimeException) {
                     Log.e(TAG, "RuntimeException stopping MediaRecorder: dynamic check, might be too short", exc)
@@ -1366,6 +1491,46 @@ class CameraFragment : Fragment() {
                 _fragmentCameraBinding?.galleryButton?.isEnabled = true
             }
         }
+    }
+
+    /**
+     * Starts the SUPER8 "film reel" countdown. Shows a progress bar that
+     * drains over [SUPER8_MAX_MILLIS] and auto-stops the recording when the
+     * reel runs out, mimicking a fixed-length Super-8 cartridge.
+     */
+    private fun startReelCountdown() {
+        val binding = _fragmentCameraBinding ?: return
+        binding.filmReelBar?.visibility = View.VISIBLE
+        binding.filmReelProgress?.max = 1000
+        binding.filmReelProgress?.progress = 1000
+        reelStartElapsed = android.os.SystemClock.elapsedRealtime()
+        val handler = Handler(android.os.Looper.getMainLooper())
+        reelHandler = handler
+        reelRunnable = object : Runnable {
+            override fun run() {
+                val b = _fragmentCameraBinding ?: return
+                val elapsed = android.os.SystemClock.elapsedRealtime() - reelStartElapsed
+                val remaining = (SUPER8_MAX_MILLIS - elapsed).coerceAtLeast(0L)
+                val frac = remaining.toFloat() / SUPER8_MAX_MILLIS
+                b.filmReelProgress?.progress = (frac * 1000).toInt()
+                val totalSec = (remaining + 999L) / 1000L // round up
+                val mmss = String.format(Locale.US, "%d:%02d", totalSec / 60, totalSec % 60)
+                b.filmReelText?.text = getString(R.string.film_reel_remaining, mmss)
+                if (remaining <= 0L) {
+                    if (isRecordingVideo) stopRecordingVideo()
+                } else {
+                    handler.postDelayed(this, 100L)
+                }
+            }
+        }
+        handler.post(reelRunnable!!)
+    }
+
+    private fun stopReelCountdown() {
+        reelRunnable?.let { reelHandler?.removeCallbacks(it) }
+        reelRunnable = null
+        reelHandler = null
+        _fragmentCameraBinding?.filmReelBar?.visibility = View.GONE
     }
 
     /** Flips [isProcessing] and refreshes the settings UI (which gates the
@@ -1664,6 +1829,9 @@ class CameraFragment : Fragment() {
     private fun releaseResources() {
         movieBlinkAnimator?.cancel()
         movieBlinkAnimator = null
+        stopReelCountdown()
+        super8Renderer?.release()
+        super8Renderer = null
         if (isRecordingVideo) {
             try {
                 mediaRecorder?.stop()
@@ -1958,6 +2126,23 @@ class CameraFragment : Fragment() {
                         setupMediaRecorder(videoSize, videoRotation, isTemp = true)
                     }
 
+                    // SUPER8 routes the camera through the GL renderer (which owns
+                    // the camera-facing input surface); NORMAL uses the direct
+                    // surfaces. Recreate the renderer if the video size changed.
+                    if (isSuper8()) {
+                        val existing = super8Renderer
+                        if (existing == null ||
+                            existing.videoWidth != videoSize.width ||
+                            existing.videoHeight != videoSize.height
+                        ) {
+                            existing?.release()
+                            super8Renderer = Super8Renderer(videoSize.width, videoSize.height)
+                        }
+                    } else {
+                        super8Renderer?.release()
+                        super8Renderer = null
+                    }
+
                     val captureRatio = videoSize.width.toFloat() / videoSize.height.toFloat()
                     getPreviewOutputSize(
                         fragmentCameraBinding.viewFinder.display,
@@ -1966,6 +2151,10 @@ class CameraFragment : Fragment() {
                         aspectRatio = captureRatio
                     )
                 } else {
+                    // Photo mode never uses the GL renderer — tear it down.
+                    super8Renderer?.release()
+                    super8Renderer = null
+
                     val supportedSizes = streamMap.getOutputSizes(args.pixelFormat)
                     val format = if (supportedSizes.isNullOrEmpty()) {
                         Log.w(TAG, "Requested format ${args.pixelFormat} not supported by camera $currentCameraId, falling back to JPEG")
@@ -2018,16 +2207,33 @@ class CameraFragment : Fragment() {
                         CameraCharacteristics.LENS_FACING_FRONT
                 Log.d(TAG, "PREVIEW DIAG | camera=$currentCameraId facing=${if (facingFrontPreview) "FRONT" else "BACK"} sensor=${sensorOrientation}° deviceDisplay=${deviceRotation}° swap=$needsSwap | buffer=${previewSize.width}x${previewSize.height} viewAspect=$displayWidth:$displayHeight")
 
+                if (isSuper8()) {
+                    // The GL preview surface is in portrait (display) orientation;
+                    // the renderer rotates the landscape camera frame to fill it.
+                    fragmentCameraBinding.viewFinder.setBufferSize(displayWidth, displayHeight)
+                    val previewRotation = if (facingFrontPreview) {
+                        (360 - sensorOrientation) % 360
+                    } else {
+                        sensorOrientation % 360
+                    }
+                    super8Renderer?.setPreview(
+                        fragmentCameraBinding.viewFinder.holder.surface,
+                        displayWidth, displayHeight, previewRotation, facingFrontPreview,
+                    )
+                }
+
                 if (!needsReopen) {
                     // Yield the main thread to let the layout pass complete and surface resize
                     kotlinx.coroutines.delay(250)
                 }
 
-                // Creates list of Surfaces where the camera will output frames
-                val targets = if (isVideoMode) {
-                    listOf(fragmentCameraBinding.viewFinder.holder.surface, persistentSurface!!)
-                } else {
-                    listOf(fragmentCameraBinding.viewFinder.holder.surface, imageReader.surface)
+                // Creates list of Surfaces where the camera will output frames.
+                // In SUPER8 the only camera target is the renderer's input
+                // surface; the renderer drives both preview and the encoder.
+                val targets = when {
+                    isSuper8() -> listOf(super8Renderer!!.inputSurface)
+                    isVideoMode -> listOf(fragmentCameraBinding.viewFinder.holder.surface, persistentSurface!!)
+                    else -> listOf(fragmentCameraBinding.viewFinder.holder.surface, imageReader.surface)
                 }
 
                 // Creates list of OutputConfigurations where the camera will output frames
@@ -2048,12 +2254,16 @@ class CameraFragment : Fragment() {
                 Log.d(TAG, "Capture session created successfully.")
 
                 val template = if (isVideoMode) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW
-                val captureRequest = camera.createCaptureRequest(template).apply { 
-                    addTarget(fragmentCameraBinding.viewFinder.holder.surface)
-                    if (isRecordingVideo && persistentSurface != null) {
-                        addTarget(persistentSurface!!)
+                val captureRequest = camera.createCaptureRequest(template).apply {
+                    if (isSuper8()) {
+                        addTarget(super8Renderer!!.inputSurface)
+                    } else {
+                        addTarget(fragmentCameraBinding.viewFinder.holder.surface)
+                        if (isRecordingVideo && persistentSurface != null) {
+                            addTarget(persistentSurface!!)
+                        }
                     }
-                    
+
                     applyCaptureRequestSettings(this)
                 }
 
@@ -2743,6 +2953,7 @@ class CameraFragment : Fragment() {
             putBoolean("pref_is_video_mode", isVideoMode)
             putInt("pref_video_fps", videoFrameRate)
             putString("pref_video_resolution", videoResolution.name)
+            putString("pref_video_preset", videoPreset.name)
             apply()
         }
     }
@@ -2768,6 +2979,9 @@ class CameraFragment : Fragment() {
         persistentSurface = null
         movieBlinkAnimator?.cancel()
         movieBlinkAnimator = null
+        stopReelCountdown()
+        super8Renderer?.release()
+        super8Renderer = null
         _fragmentCameraBinding = null
         super.onDestroyView()
     }
@@ -2783,6 +2997,9 @@ class CameraFragment : Fragment() {
 
         /** How long the error message stays visible before dismissing the overlay. */
         private const val ERROR_INDICATOR_MILLIS: Long = 1800
+
+        /** SUPER8 "film reel" length — recordings auto-stop after this. */
+        private const val SUPER8_MAX_MILLIS: Long = 200_000L
 
         /** Helper data class used to hold capture metadata with their associated image */
         data class CombinedCaptureResult(

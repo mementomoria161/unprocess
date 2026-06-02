@@ -103,6 +103,44 @@
 
         </FrameLayout>
 
+        <!-- Super8 "film reel" countdown. Shown only while a Super8 clip is
+             being recorded; the reel is artificially limited to 200 s. -->
+        <LinearLayout
+            android:id="@+id/film_reel_bar"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/film_reel_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="6dp"
+                android:fontFamily="monospace"
+                android:shadowColor="#CC000000"
+                android:shadowDx="0"
+                android:shadowDy="1"
+                android:shadowRadius="3"
+                android:text="@string/preset_super8"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+
+            <ProgressBar
+                android:id="@+id/film_reel_progress"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="6dp"
+                android:max="1000"
+                android:progress="1000"
+                android:progressTint="?attr/colorPrimary"
+                android:progressBackgroundTint="#55FFFFFF" />
+
+        </LinearLayout>
+
     </com.google.android.material.card.MaterialCardView>
 
     <com.google.android.material.card.MaterialCardView
@@ -305,6 +343,22 @@
             android:layout_marginBottom="8dp"
             android:layout_gravity="end"
             android:text="30 FPS"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:visibility="gone" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/preset_toggle"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:layout_marginBottom="8dp"
+            android:layout_gravity="end"
+            android:text="@string/preset_normal"
             android:insetTop="0dp"
             android:insetBottom="0dp"
             android:insetLeft="0dp"

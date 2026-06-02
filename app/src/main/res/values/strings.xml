@@ -26,4 +26,9 @@
     <string name="filter_normal">Normal</string>
     <string name="video_record">Record</string>
     <string name="video_stop">Stop</string>
+    <!-- Video presets -->
+    <string name="preset_normal">Normal</string>
+    <string name="preset_super8">Super8</string>
+    <!-- Super8 film reel countdown. %1$s is the remaining time, e.g. "3:20". -->
+    <string name="film_reel_remaining">Remaining film reel: %1$s</string>
 </resources>
