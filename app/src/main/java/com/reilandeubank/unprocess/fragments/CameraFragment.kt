@@ -324,6 +324,8 @@ class CameraFragment : Fragment() {
 
         fragmentCameraBinding.aspectRatioToggle?.setOnClickListener {
             if (isRecordingVideo || isProcessing) return@setOnClickListener
+            // Super-8 is locked to 4:3.
+            if (isSuper8()) return@setOnClickListener
             aspectRatio = when (aspectRatio) {
                 AspectRatio.RATIO_4_3 -> AspectRatio.RATIO_1_1
                 AspectRatio.RATIO_1_1 -> AspectRatio.RATIO_16_9
@@ -927,7 +929,8 @@ class CameraFragment : Fragment() {
             }
         }
 
-        val aspectAvailable = !isProcessing && !isRecordingVideo
+        // Super-8 is locked to 4:3, so the aspect-ratio toggle is disabled there.
+        val aspectAvailable = !isProcessing && !isRecordingVideo && !isSuper8()
         binding.aspectRatioToggle?.isEnabled = aspectAvailable
         setButtonActiveStyle(binding.aspectRatioToggle, aspectAvailable)
 
@@ -1065,12 +1068,12 @@ class CameraFragment : Fragment() {
      */
     private fun coerceSuper8VideoSettings() {
         videoFrameRate = 18
-        val supported = getSupportedVideoResolutions()
-        videoResolution = when {
-            VideoResolution.FHD_1080P in supported -> VideoResolution.FHD_1080P
-            VideoResolution.SD_480P in supported -> VideoResolution.SD_480P
-            else -> supported.lastOrNull() ?: VideoResolution.FHD_1080P
-        }
+        // Real Super-8 is a ~4:3 frame — lock the effective aspect to 4:3 (the
+        // saved videoAspectRatio preference for NORMAL is left untouched).
+        aspectRatio = AspectRatio.RATIO_4_3
+        // Super-8 was a low-resolution format — record at 480p (also keeps the
+        // grain chunky and the encoder happy).
+        videoResolution = VideoResolution.SD_480P
     }
 
     /**
@@ -1335,7 +1338,14 @@ class CameraFragment : Fragment() {
                     // surface, then let the camera feed the renderer's
                     // SurfaceTexture (camera → GL → encoder).
                     mediaRecorder?.start()
-                    persistentSurface?.let { super8Renderer?.startEncoder(it) }
+                    // The GL stage already delivers a display-upright (natural
+                    // portrait) frame, so we only need to add the device-rotation
+                    // delta to make landscape (and upside-down) recordings upright
+                    // too. encoderBuffer dims + orientationHint=0 are set in
+                    // configureAndPrepareMediaRecorder.
+                    val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+                    val encoderRotation = ((videoRotation - sensorOrientation) + 360) % 360
+                    persistentSurface?.let { super8Renderer?.startEncoder(it, encoderRotation) }
                     val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
                         addTarget(fragmentCameraBinding.viewFinder.holder.surface)
                         addTarget(renderInput)
@@ -2181,20 +2191,38 @@ class CameraFragment : Fragment() {
                         setupMediaRecorder(videoSize, videoRotation, isTemp = true)
                     }
 
+                    val captureRatio = videoSize.width.toFloat() / videoSize.height.toFloat()
+                    val computedPreviewSize = getPreviewOutputSize(
+                        fragmentCameraBinding.viewFinder.display,
+                        characteristics,
+                        SurfaceHolder::class.java,
+                        aspectRatio = captureRatio
+                    )
+
                     // SUPER8 inserts the GL renderer between the camera and the
                     // encoder (the camera writes to the renderer's SurfaceTexture,
                     // the renderer bakes the film look into the recording). The
-                    // on-screen preview stays a plain camera preview. Recreate the
-                    // renderer if the video size changed; if GL init fails on this
-                    // device, fall back to NORMAL so video still works.
+                    // on-screen preview stays a plain camera preview.
+                    //
+                    // IMPORTANT: capture into the SurfaceTexture at the FOV-correct
+                    // preview size (e.g. 1440x1080), NOT the small encoder size
+                    // (e.g. 640x480). Some HALs crop the ultrawide to a narrower
+                    // (zoomed) field of view at small output sizes, which made the
+                    // recording look zoomed even though the preview was wide. The
+                    // GL stage then downscales to the chosen encoder size (480p).
+                    //
+                    // Recreate the renderer if the capture size changed; if GL init
+                    // fails on this device, fall back to NORMAL so video still works.
                     if (isSuper8()) {
+                        val capW = computedPreviewSize.width
+                        val capH = computedPreviewSize.height
                         val existing = super8Renderer
                         if (existing == null ||
-                            existing.videoWidth != videoSize.width ||
-                            existing.videoHeight != videoSize.height
+                            existing.videoWidth != capW ||
+                            existing.videoHeight != capH
                         ) {
                             existing?.release()
-                            super8Renderer = Super8Renderer.createOrNull(videoSize.width, videoSize.height)
+                            super8Renderer = Super8Renderer.createOrNull(capW, capH)
                         }
                         if (super8Renderer == null) {
                             Log.e(TAG, "Super8 GL pipeline unavailable; falling back to NORMAL preset")
@@ -2207,13 +2235,7 @@ class CameraFragment : Fragment() {
                         super8Renderer = null
                     }
 
-                    val captureRatio = videoSize.width.toFloat() / videoSize.height.toFloat()
-                    getPreviewOutputSize(
-                        fragmentCameraBinding.viewFinder.display,
-                        characteristics,
-                        SurfaceHolder::class.java,
-                        aspectRatio = captureRatio
-                    )
+                    computedPreviewSize
                 } else {
                     // Photo mode never uses the GL renderer — tear it down.
                     super8Renderer?.release()

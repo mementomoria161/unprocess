@@ -112,9 +112,11 @@ class Super8Renderer private constructor(
 
     /**
      * Starts feeding the hardware encoder with [surface] (the MediaRecorder/
-     * MediaCodec input surface). Asynchronous.
+     * MediaCodec input surface). [rotationDeg] (0/90/180/270, clockwise) bakes
+     * the device orientation into the encoded pixels so the recorder can use
+     * orientationHint=0 — see CameraFragment for the derivation. Asynchronous.
      */
-    fun startEncoder(surface: Surface) {
+    fun startEncoder(surface: Surface, rotationDeg: Int) {
         handler.post {
             try {
                 if (released) return@post
@@ -122,10 +124,13 @@ class Super8Renderer private constructor(
                 encoderEgl = createWindowSurface(surface)
                 encoderSurfW = querySurface(encoderEgl, EGL14.EGL_WIDTH)
                 encoderSurfH = querySurface(encoderEgl, EGL14.EGL_HEIGHT)
+                // Negative because gl uses CCW-positive rotation while the
+                // orientation contract is clockwise.
+                Matrix.setRotateM(encoderMvp, 0, -rotationDeg.toFloat(), 0f, 0f, 1f)
                 Log.d(
                     TAG,
                     "startEncoder: requested=${videoWidth}x$videoHeight " +
-                        "actual EGL surface=${encoderSurfW}x$encoderSurfH",
+                        "actual EGL surface=${encoderSurfW}x$encoderSurfH rot=$rotationDeg",
                 )
                 lastDrawTs = 0L
                 recording = true
@@ -533,31 +538,34 @@ class Super8Renderer private constructor(
                 vec2 uv = clamp(vTexCoord, 0.0, 1.0);
                 vec3 col = texture2D(sTexture, uv).rgb;
 
-                // --- Procedural LUT: warm, faded Super-8 grade (deliberately
-                //     strong so the look is unmistakable on the recording) ---
-                // Faded film: lift blacks noticeably, pull highlights a touch.
-                col = col * 0.82 + 0.10;
-                // Soft S-curve for film contrast.
-                col = (col - 0.5) * 1.12 + 0.5;
-                // Moderate desaturation toward the muted film palette.
+                // --- Procedural LUT: natural Super-8 colour grading ---
+                // Aim is a believable consumer-film look (Kodachrome/Ektachrome
+                // home movie), NOT a heavy sepia: gentle contrast, slightly
+                // lifted "milky" blacks, a soft warm cast and lightly muted but
+                // still present colour.
+                // Soft S-curve — film has gentle, rolled-off contrast.
+                col = (col - 0.5) * 1.06 + 0.5;
+                // Lifted, slightly milky blacks (aged film base).
+                col = col * 0.93 + 0.035;
+                // Light desaturation — film is a touch muted but keeps its hues.
                 float luma = dot(col, vec3(0.299, 0.587, 0.114));
-                col = mix(vec3(luma), col, 0.68);
-                // Strong warm white balance (Kodak amber): push red, cut blue.
-                col.r *= 1.18;
-                col.g *= 1.02;
-                col.b *= 0.80;
-                // Amber highlights + brown shadows split-tone.
-                col += vec3(0.08, 0.035, -0.02) * smoothstep(0.40, 1.0, luma);
-                col += vec3(0.06, 0.02, -0.015) * (1.0 - smoothstep(0.0, 0.55, luma));
+                col = mix(vec3(luma), col, 0.90);
+                // Gentle warm balance (natural, not orange).
+                col.r *= 1.045;
+                col.g *= 1.005;
+                col.b *= 0.95;
+                // Subtle cohesive warm tone: a little in highlights and shadows.
+                col += vec3(0.022, 0.010, 0.0) * smoothstep(0.5, 1.0, luma);
+                col += vec3(0.018, 0.008, 0.0) * (1.0 - smoothstep(0.0, 0.5, luma));
 
-                // --- Halation: warm glow bleeding from highlights ---
-                col += vec3(0.12, 0.04, 0.0) * pow(max(luma - 0.6, 0.0), 2.0) * 3.0;
+                // --- Halation: faint warm glow bleeding from highlights ---
+                col += vec3(0.06, 0.02, 0.0) * pow(max(luma - 0.65, 0.0), 2.0) * 2.0;
 
-                // --- Vignette (clearly visible darkened corners) ---
+                // --- Vignette (soft, gently darkened corners) ---
                 vec2 q = uv - 0.5;
-                float vig = 1.0 - dot(q, q) * 1.8;
+                float vig = 1.0 - dot(q, q) * 1.25;
                 vig = clamp(vig, 0.0, 1.0);
-                col *= mix(0.30, 1.0, vig);
+                col *= mix(0.6, 1.0, vig);
 
                 // --- Projector flicker (brightness fluctuation) ---
                 float flick = 1.0
