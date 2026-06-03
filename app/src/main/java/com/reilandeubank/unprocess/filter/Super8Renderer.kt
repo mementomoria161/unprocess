@@ -17,38 +17,33 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
- * OpenGL ES 2.0 video pipeline that turns the raw camera stream into a
- * Super-8-style image and feeds it to both the on-screen preview and the
- * hardware encoder.
+ * OpenGL ES 2.0 stage that bakes a Super-8 film look into the recorded video.
  *
  * Data flow:
  *
  *   Camera2 → [inputSurface] → SurfaceTexture (GL_TEXTURE_EXTERNAL_OES)
  *           → fragment shader (procedural LUT + grain + vignette + flicker
  *             + halation + gate-weave + scratches/dust)
- *           → preview EGLSurface  (rotated for the portrait viewfinder)
- *           → encoder EGLSurface  (sensor orientation; MediaRecorder applies
- *             its rotation hint at playback, exactly like the direct path)
+ *           → encoder EGLSurface (MediaRecorder/MediaCodec hardware H.264)
  *
- * Everything runs on a dedicated GL thread. The camera writes frames to
- * [inputSurface]; each frame triggers [SurfaceTexture.OnFrameAvailableListener]
- * which schedules a draw on that thread.
+ * Deliberately the renderer does NOT touch the on-screen preview SurfaceView —
+ * the preview remains a plain camera preview, exactly like the normal video
+ * path. That keeps the fragile parts (EGL window surfaces, surface hand-off,
+ * orientation) confined to the encoder's own persistent input surface, which
+ * only exists while recording. The result: opening video mode is as safe as
+ * the normal pipeline, and the Super-8 grade is rendered into the saved file.
  *
- * The Super-8 look is fully procedural — no .cube LUT file is needed, the
- * colour transform is computed in the shader (see [FRAGMENT_SHADER]).
+ * Everything GL runs on a dedicated thread, and every callback body is wrapped
+ * so a stray throwable can never kill that thread (and with it the process).
  */
-class Super8Renderer(
+class Super8Renderer private constructor(
     val videoWidth: Int,
     val videoHeight: Int,
 ) {
-    /** Surface the camera capture session draws into. Stable for the lifetime
-     *  of this renderer, so the camera session can be re-created (e.g. on a
-     *  lens switch) without tearing the renderer down. */
-    lateinit var inputSurface: Surface
-        private set
-
+    private lateinit var inputSurfaceInternal: Surface
     private lateinit var surfaceTexture: SurfaceTexture
 
     private val thread = HandlerThread("Super8GL").apply { start() }
@@ -58,19 +53,16 @@ class Super8Renderer(
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
     private var eglConfig: EGLConfig? = null
-    /** 1x1 offscreen surface kept current whenever no real target is bound,
-     *  so the GL context (and the external texture) stays valid. */
+    /** 1x1 offscreen surface kept current when nothing else is bound, so the
+     *  context (and the external texture) stays valid for updateTexImage. */
     private var pbufferSurface: EGLSurface = EGL14.EGL_NO_SURFACE
-
-    private var previewSurface: Surface? = null
-    private var previewEgl: EGLSurface = EGL14.EGL_NO_SURFACE
-    private var previewW = 0
-    private var previewH = 0
-    private val previewMvp = FloatArray(16)
 
     private var encoderSurface: Surface? = null
     private var encoderEgl: EGLSurface = EGL14.EGL_NO_SURFACE
     private val encoderMvp = FloatArray(16)
+    /** Actual EGL surface size of the encoder input (queried, not assumed). */
+    private var encoderSurfW = 0
+    private var encoderSurfH = 0
     @Volatile private var recording = false
 
     // GL program
@@ -99,107 +91,115 @@ class Super8Renderer(
     private var lastDrawTs = 0L
     @Volatile private var released = false
 
-    init {
+    /** The camera-facing input surface, or null if GL init failed. Stable for
+     *  the renderer's lifetime, so the camera session can be re-created without
+     *  tearing the renderer down. */
+    fun inputSurfaceOrNull(): Surface? =
+        if (!released && ::inputSurfaceInternal.isInitialized) inputSurfaceInternal else null
+
+    private fun initOnGlThread() {
+        Matrix.setIdentityM(encoderMvp, 0)
+        initEgl()
+        makeCurrent(pbufferSurface)
+        program = buildProgram(VERTEX_SHADER, FRAGMENT_SHADER)
+        oesTextureId = createOesTexture()
+        surfaceTexture = SurfaceTexture(oesTextureId).apply {
+            setDefaultBufferSize(videoWidth, videoHeight)
+            setOnFrameAvailableListener { scheduleDraw() }
+        }
+        inputSurfaceInternal = Surface(surfaceTexture)
+    }
+
+    /**
+     * Starts feeding the hardware encoder with [surface] (the MediaRecorder/
+     * MediaCodec input surface). Asynchronous.
+     */
+    fun startEncoder(surface: Surface) {
+        handler.post {
+            try {
+                if (released) return@post
+                encoderSurface = surface
+                encoderEgl = createWindowSurface(surface)
+                encoderSurfW = querySurface(encoderEgl, EGL14.EGL_WIDTH)
+                encoderSurfH = querySurface(encoderEgl, EGL14.EGL_HEIGHT)
+                Log.d(
+                    TAG,
+                    "startEncoder: requested=${videoWidth}x$videoHeight " +
+                        "actual EGL surface=${encoderSurfW}x$encoderSurfH",
+                )
+                lastDrawTs = 0L
+                recording = true
+            } catch (t: Throwable) {
+                Log.e(TAG, "startEncoder failed", t)
+                recording = false
+                encoderEgl = EGL14.EGL_NO_SURFACE
+            }
+        }
+    }
+
+    private fun querySurface(surface: EGLSurface, what: Int): Int {
+        val v = IntArray(1)
+        return if (EGL14.eglQuerySurface(eglDisplay, surface, what, v, 0) && v[0] > 0) v[0] else 0
+    }
+
+    /**
+     * Stops feeding the encoder and BLOCKS (bounded) until the GL thread has
+     * finished any in-flight draw and destroyed the encoder EGL surface. The
+     * caller must invoke this BEFORE MediaRecorder.stop() so a swapBuffers on
+     * the GL thread can never race with the surface being torn down — that
+     * race is a native crash, uncatchable by try/catch.
+     */
+    fun stopEncoder() {
+        // Halt new encoder draws immediately (volatile), then drain the GL queue.
+        recording = false
+        if (released) return
         val latch = CountDownLatch(1)
         handler.post {
             try {
-                initEgl()
-                makeCurrent(pbufferSurface)
-                program = buildProgram(VERTEX_SHADER, FRAGMENT_SHADER)
-                oesTextureId = createOesTexture()
-                surfaceTexture = SurfaceTexture(oesTextureId).apply {
-                    setDefaultBufferSize(videoWidth, videoHeight)
-                    setOnFrameAvailableListener { scheduleDraw() }
-                }
-                inputSurface = Surface(surfaceTexture)
-            } catch (e: Exception) {
-                Log.e(TAG, "GL init failed", e)
+                recording = false
+                releaseEncoderEgl()
+                encoderSurface = null
+            } catch (t: Throwable) {
+                Log.w(TAG, "stopEncoder error", t)
             } finally {
                 latch.countDown()
             }
         }
-        latch.await()
-    }
-
-    /** Binds the on-screen preview output. [rotationDeg] rotates the frame for
-     *  the portrait viewfinder; [mirror] flips horizontally for the selfie cam. */
-    fun setPreview(surface: Surface?, width: Int, height: Int, rotationDeg: Int, mirror: Boolean) {
-        handler.post {
-            if (released) return@post
-            releasePreviewEgl()
-            previewSurface = surface
-            previewW = width
-            previewH = height
-            // Geometry transform: rotate the textured quad so the landscape
-            // camera frame lands upright in the portrait surface, mirroring
-            // for the front lens. Texture sampling itself is handled by the
-            // SurfaceTexture transform matrix in the vertex shader.
-            Matrix.setIdentityM(previewMvp, 0)
-            if (mirror) Matrix.scaleM(previewMvp, 0, -1f, 1f, 1f)
-            Matrix.rotateM(previewMvp, 0, rotationDeg.toFloat(), 0f, 0f, 1f)
-            if (surface != null && surface.isValid) {
-                try {
-                    previewEgl = createWindowSurface(surface)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to create preview EGL surface", e)
-                    previewEgl = EGL14.EGL_NO_SURFACE
-                }
-            }
-        }
-    }
-
-    /** Starts/stops feeding the hardware encoder. Pass the encoder's input
-     *  surface (from MediaRecorder/MediaCodec) to begin, or null to stop. */
-    fun setEncoder(surface: Surface?) {
-        // Stop new encoder draws as early as possible so MediaRecorder.stop()
-        // isn't racing with a frame still being submitted.
-        if (surface == null) recording = false
-        handler.post {
-            if (released) return@post
-            if (surface == null) {
-                recording = false
-                releaseEncoderEgl()
-                encoderSurface = null
-                return@post
-            }
-            encoderSurface = surface
-            // Encoder receives the frame in sensor orientation; the recorder's
-            // orientation hint rotates it on playback (matches the non-GL path).
-            Matrix.setIdentityM(encoderMvp, 0)
-            try {
-                encoderEgl = createWindowSurface(surface)
-                recording = true
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to create encoder EGL surface", e)
-                encoderEgl = EGL14.EGL_NO_SURFACE
-                recording = false
-            }
+        try {
+            latch.await(1, TimeUnit.SECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
         }
     }
 
     fun release() {
         if (released) return
         released = true
+        recording = false
         val latch = CountDownLatch(1)
         handler.post {
             try {
                 releaseEncoderEgl()
-                releasePreviewEgl()
                 if (program != 0) GLES20.glDeleteProgram(program)
                 if (oesTextureId != 0) GLES20.glDeleteTextures(1, intArrayOf(oesTextureId), 0)
                 if (::surfaceTexture.isInitialized) {
                     surfaceTexture.setOnFrameAvailableListener(null)
                     surfaceTexture.release()
                 }
-                if (::inputSurface.isInitialized) inputSurface.release()
+                if (::inputSurfaceInternal.isInitialized) inputSurfaceInternal.release()
                 releaseEgl()
-            } catch (e: Exception) {
-                Log.w(TAG, "Error during release", e)
+            } catch (t: Throwable) {
+                Log.w(TAG, "Error during release", t)
             } finally {
                 latch.countDown()
             }
         }
-        latch.await()
+        // Bounded wait so a wedged GL thread can never ANR the caller.
+        try {
+            latch.await(2, TimeUnit.SECONDS)
+        } catch (e: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
         thread.quitSafely()
     }
 
@@ -213,45 +213,48 @@ class Super8Renderer(
     private fun drawFrame() {
         if (released) return
         try {
-            // updateTexImage needs a current context; keep the pbuffer current
-            // when there's no preview surface yet.
-            val anchor = if (previewEgl != EGL14.EGL_NO_SURFACE) previewEgl else pbufferSurface
-            makeCurrent(anchor)
-            // Always consume the buffer (releases it back to the camera) before
-            // deciding whether to draw it.
+            // updateTexImage needs a current context; the pbuffer is always valid.
+            makeCurrent(pbufferSurface)
+            // Always consume the buffer (releases it back to the camera) even
+            // when we're not recording or decide to drop it for pacing.
             surfaceTexture.updateTexImage()
             surfaceTexture.getTransformMatrix(stMatrix)
-            val timestampNs = surfaceTexture.timestamp
 
-            // Pace to ~18 fps regardless of the sensor's actual rate, so the
-            // Super-8 cadence (and its choppy motion) is consistent. Allow a
-            // small slack so we don't accidentally halve the rate.
-            if (timestampNs > 0 && lastDrawTs > 0 &&
-                timestampNs - lastDrawTs < (FRAME_INTERVAL_NS * 0.85).toLong()
+            if (!recording || encoderEgl == EGL14.EGL_NO_SURFACE) return
+            val surf = encoderSurface
+            if (surf == null || !surf.isValid) return
+
+            // Timestamp in CLOCK_MONOTONIC (System.nanoTime). We deliberately do
+            // NOT use SurfaceTexture.timestamp: the camera reports it in the
+            // sensor's clock (often CLOCK_BOOTTIME, which includes time the
+            // device spent asleep), whereas MediaRecorder's MIC audio track is
+            // in CLOCK_MONOTONIC. Mixing the two makes the muxer think the
+            // tracks are minutes apart → a bogus multi-minute duration and an
+            // unplayable file. nanoTime matches the audio clock and keeps A/V
+            // in sync. We also pace to ~18 fps off the same wall clock.
+            val nowNs = System.nanoTime()
+            if (lastDrawTs > 0 &&
+                nowNs - lastDrawTs < (FRAME_INTERVAL_NS * 0.85).toLong()
             ) {
                 return
             }
-            lastDrawTs = timestampNs
+            lastDrawTs = nowNs
             frameCount++
 
-            previewSurface?.let { surf ->
-                if (previewEgl != EGL14.EGL_NO_SURFACE && surf.isValid) {
-                    makeCurrent(previewEgl)
-                    // Query the live surface size — the fixed-size change on the
-                    // SurfaceView is async, so don't trust a cached width/height.
-                    render(surfaceWidth(previewEgl), surfaceHeight(previewEgl), previewMvp)
-                    EGL14.eglSwapBuffers(eglDisplay, previewEgl)
-                }
-            }
-
-            if (recording && encoderEgl != EGL14.EGL_NO_SURFACE) {
-                makeCurrent(encoderEgl)
-                render(videoWidth, videoHeight, encoderMvp)
-                EGLExt_setPresentationTime(encoderEgl, if (timestampNs > 0) timestampNs else System.nanoTime())
-                EGL14.eglSwapBuffers(eglDisplay, encoderEgl)
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "drawFrame error", e)
+            makeCurrent(encoderEgl)
+            // Use the encoder surface's ACTUAL size so the viewport always
+            // fills it exactly (prevents squished/stretched output if it ever
+            // differs from the requested video size).
+            val ew = if (encoderSurfW > 0) encoderSurfW else videoWidth
+            val eh = if (encoderSurfH > 0) encoderSurfH else videoHeight
+            render(ew, eh, encoderMvp)
+            setPresentationTime(encoderEgl, nowNs)
+            EGL14.eglSwapBuffers(eglDisplay, encoderEgl)
+            // Return to the pbuffer so the encoder surface isn't left current
+            // (it may be torn down by stopEncoder() at any time).
+            makeCurrent(pbufferSurface)
+        } catch (t: Throwable) {
+            Log.w(TAG, "drawFrame error", t)
         }
     }
 
@@ -326,6 +329,9 @@ class Super8Renderer(
 
         val pbAttribs = intArrayOf(EGL14.EGL_WIDTH, 1, EGL14.EGL_HEIGHT, 1, EGL14.EGL_NONE)
         pbufferSurface = EGL14.eglCreatePbufferSurface(eglDisplay, eglConfig, pbAttribs, 0)
+        if (pbufferSurface == EGL14.EGL_NO_SURFACE) {
+            throw RuntimeException("eglCreatePbufferSurface failed")
+        }
     }
 
     private fun createWindowSurface(surface: Surface): EGLSurface {
@@ -337,37 +343,25 @@ class Super8Renderer(
         return egl
     }
 
-    private fun surfaceWidth(surface: EGLSurface): Int {
-        val v = IntArray(1)
-        EGL14.eglQuerySurface(eglDisplay, surface, EGL14.EGL_WIDTH, v, 0)
-        return if (v[0] > 0) v[0] else previewW
-    }
-
-    private fun surfaceHeight(surface: EGLSurface): Int {
-        val v = IntArray(1)
-        EGL14.eglQuerySurface(eglDisplay, surface, EGL14.EGL_HEIGHT, v, 0)
-        return if (v[0] > 0) v[0] else previewH
-    }
-
     private fun makeCurrent(surface: EGLSurface) {
         if (!EGL14.eglMakeCurrent(eglDisplay, surface, surface, eglContext)) {
             throw RuntimeException("eglMakeCurrent failed: ${EGL14.eglGetError()}")
         }
     }
 
-    private fun EGLExt_setPresentationTime(surface: EGLSurface, nsecs: Long) {
+    private fun setPresentationTime(surface: EGLSurface, nsecs: Long) {
         android.opengl.EGLExt.eglPresentationTimeANDROID(eglDisplay, surface, nsecs)
-    }
-
-    private fun releasePreviewEgl() {
-        if (previewEgl != EGL14.EGL_NO_SURFACE) {
-            EGL14.eglDestroySurface(eglDisplay, previewEgl)
-            previewEgl = EGL14.EGL_NO_SURFACE
-        }
     }
 
     private fun releaseEncoderEgl() {
         if (encoderEgl != EGL14.EGL_NO_SURFACE) {
+            try {
+                // Don't destroy whatever is current.
+                EGL14.eglMakeCurrent(
+                    eglDisplay, pbufferSurface, pbufferSurface, eglContext,
+                )
+            } catch (_: Throwable) {
+            }
             EGL14.eglDestroySurface(eglDisplay, encoderEgl)
             encoderEgl = EGL14.EGL_NO_SURFACE
         }
@@ -465,6 +459,39 @@ class Super8Renderer(
         /** Target Super-8 cadence: 18 fps → ~55.5 ms between frames. */
         private const val FRAME_INTERVAL_NS = 1_000_000_000.0 / 18.0
 
+        /**
+         * Creates a renderer and blocks (briefly, with a timeout) until the GL
+         * context and camera-facing input surface are ready. Returns null if GL
+         * initialisation fails on this device — callers must fall back to the
+         * normal (non-GL) pipeline so video still works.
+         */
+        fun createOrNull(videoWidth: Int, videoHeight: Int): Super8Renderer? {
+            val renderer = Super8Renderer(videoWidth, videoHeight)
+            val latch = CountDownLatch(1)
+            var ok = false
+            renderer.handler.post {
+                try {
+                    renderer.initOnGlThread()
+                    ok = true
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Super8 GL init failed", t)
+                } finally {
+                    latch.countDown()
+                }
+            }
+            val completed = try {
+                latch.await(3, TimeUnit.SECONDS)
+            } catch (e: InterruptedException) {
+                Thread.currentThread().interrupt()
+                false
+            }
+            if (!completed || !ok || renderer.inputSurfaceOrNull() == null) {
+                renderer.release()
+                return null
+            }
+            return renderer
+        }
+
         private const val VERTEX_SHADER = """
             attribute vec4 aPosition;
             attribute vec4 aTexCoord;
@@ -506,30 +533,31 @@ class Super8Renderer(
                 vec2 uv = clamp(vTexCoord, 0.0, 1.0);
                 vec3 col = texture2D(sTexture, uv).rgb;
 
-                // --- Procedural LUT: warm, faded film grade ---
-                // Lift blacks for the milky-shadow look.
-                col = col * 0.93 + 0.055;
-                // Gentle S-curve for soft film contrast.
-                col = (col - 0.5) * 1.10 + 0.5;
-                // Warm white balance (boost red, pull blue) — Kodak warmth.
-                col.r *= 1.07;
-                col.g *= 1.015;
-                col.b *= 0.90;
-                // Slight overall desaturation.
+                // --- Procedural LUT: warm, faded Super-8 grade (deliberately
+                //     strong so the look is unmistakable on the recording) ---
+                // Faded film: lift blacks noticeably, pull highlights a touch.
+                col = col * 0.82 + 0.10;
+                // Soft S-curve for film contrast.
+                col = (col - 0.5) * 1.12 + 0.5;
+                // Moderate desaturation toward the muted film palette.
                 float luma = dot(col, vec3(0.299, 0.587, 0.114));
-                col = mix(vec3(luma), col, 0.84);
-                // Warm split-tone: amber highlights, brown-ish shadows.
-                col += vec3(0.04, 0.015, -0.02) * smoothstep(0.45, 1.0, luma);
-                col += vec3(0.03, 0.008, -0.015) * (1.0 - smoothstep(0.0, 0.5, luma));
+                col = mix(vec3(luma), col, 0.68);
+                // Strong warm white balance (Kodak amber): push red, cut blue.
+                col.r *= 1.18;
+                col.g *= 1.02;
+                col.b *= 0.80;
+                // Amber highlights + brown shadows split-tone.
+                col += vec3(0.08, 0.035, -0.02) * smoothstep(0.40, 1.0, luma);
+                col += vec3(0.06, 0.02, -0.015) * (1.0 - smoothstep(0.0, 0.55, luma));
 
                 // --- Halation: warm glow bleeding from highlights ---
-                col += vec3(0.10, 0.035, 0.0) * pow(max(luma - 0.62, 0.0), 2.0) * 3.0;
+                col += vec3(0.12, 0.04, 0.0) * pow(max(luma - 0.6, 0.0), 2.0) * 3.0;
 
-                // --- Vignette ---
+                // --- Vignette (clearly visible darkened corners) ---
                 vec2 q = uv - 0.5;
-                float vig = 1.0 - dot(q, q) * 1.25;
+                float vig = 1.0 - dot(q, q) * 1.8;
                 vig = clamp(vig, 0.0, 1.0);
-                col *= mix(0.45, 1.0, vig);
+                col *= mix(0.30, 1.0, vig);
 
                 // --- Projector flicker (brightness fluctuation) ---
                 float flick = 1.0
