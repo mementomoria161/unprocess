@@ -1520,7 +1520,7 @@ class CameraFragment : Fragment() {
                             @Suppress("DEPRECATION")
                             android.media.ThumbnailUtils.createVideoThumbnail(
                                 file.absolutePath,
-                                android.provider.MediaStore.Video.Thumbnails.MINI_KIND
+                                MediaStore.Video.Thumbnails.MINI_KIND
                             )
                         }
                     } catch (e: Exception) {
