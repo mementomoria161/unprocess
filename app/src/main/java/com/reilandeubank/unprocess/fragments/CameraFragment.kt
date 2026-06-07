@@ -555,11 +555,11 @@ class CameraFragment : Fragment() {
     private fun updateModeToggleUI() {
         val binding = _fragmentCameraBinding ?: return
         if (isVideoMode) {
-            binding.modeToggle?.text = "MP4"
+            binding.modeToggle?.text = "Format: MP4"
             binding.modeToggle?.isEnabled = false
             binding.modeToggle?.let { setButtonActiveStyle(it, false) }
         } else {
-            binding.modeToggle?.text = outputFormat.name
+            binding.modeToggle?.text = "Format: ${outputFormat.name}"
             val modeToggleAvailable = !isProcessing
             binding.modeToggle?.isEnabled = modeToggleAvailable
             binding.modeToggle?.let { setButtonActiveStyle(it, modeToggleAvailable) }
@@ -577,11 +577,12 @@ class CameraFragment : Fragment() {
     }
 
     private fun updateAspectRatioUI() {
-        fragmentCameraBinding.aspectRatioToggle?.text = when (aspectRatio) {
+        val ratioText = when (aspectRatio) {
             AspectRatio.RATIO_1_1 -> getString(R.string.aspect_ratio_square)
             AspectRatio.RATIO_4_3 -> getString(R.string.aspect_ratio_full)
             AspectRatio.RATIO_16_9 -> getString(R.string.aspect_ratio_16_9)
         }
+        fragmentCameraBinding.aspectRatioToggle?.text = "Aspect Ratio: $ratioText"
     }
 
     private var allCameraIds: List<String> = emptyList()
@@ -811,21 +812,23 @@ class CameraFragment : Fragment() {
                 
             panel.visibility = View.VISIBLE
             
-            val offset = (-8).dpToPx().toFloat()
+            val startTranslationX = 100.dpToPx().toFloat()
             toggles.forEachIndexed { index, button ->
                 button.alpha = 0f
                 button.scaleX = 0.3f
                 button.scaleY = 0.3f
-                button.translationY = offset
+                button.translationX = startTranslationX
+                button.translationY = 0f
                 
                 button.animate()
                     .alpha(1f)
                     .scaleX(1f)
                     .scaleY(1f)
+                    .translationX(0f)
                     .translationY(0f)
                     .setDuration(280L)
                     .setStartDelay(index * 60L)
-                    .setInterpolator(android.view.animation.OvershootInterpolator(1.3f))
+                    .setInterpolator(android.view.animation.OvershootInterpolator(2.2f))
                     .setListener(if (index == toggles.lastIndex) {
                         object : android.animation.AnimatorListenerAdapter() {
                             override fun onAnimationEnd(animation: android.animation.Animator) {
@@ -850,14 +853,15 @@ class CameraFragment : Fragment() {
                 })
                 .start()
                 
-            val offset = (-8).dpToPx().toFloat()
+            val endTranslationX = 100.dpToPx().toFloat()
             val reversedToggles = toggles.reversed()
             reversedToggles.forEachIndexed { index, button ->
                 button.animate()
                     .alpha(0f)
                     .scaleX(0.3f)
                     .scaleY(0.3f)
-                    .translationY(offset)
+                    .translationX(endTranslationX)
+                    .translationY(0f)
                     .setDuration(200L)
                     .setStartDelay(index * 50L)
                     .setInterpolator(android.view.animation.AccelerateInterpolator())
@@ -924,6 +928,7 @@ class CameraFragment : Fragment() {
                     button.alpha = 1f
                     button.scaleX = 1f
                     button.scaleY = 1f
+                    button.translationX = 0f
                     button.translationY = 0f
                 }
             }
@@ -947,10 +952,11 @@ class CameraFragment : Fragment() {
 
         binding.presetToggle?.isEnabled = videoSettingsAvailable
         setButtonActiveStyle(binding.presetToggle, videoSettingsAvailable)
-        binding.presetToggle?.text = when (videoPreset) {
+        val presetText = when (videoPreset) {
             VideoPreset.NORMAL -> getString(R.string.preset_normal)
             VideoPreset.SUPER8 -> getString(R.string.preset_super8)
         }
+        binding.presetToggle?.text = "Filmmodus: $presetText"
 
         // The filter only takes effect on the RAW→Bitmap→JPEG conversion
         // path. In pure RAW (DNG) mode the saved file is just the sensor
@@ -969,15 +975,16 @@ class CameraFragment : Fragment() {
         binding.filterToggle?.isEnabled = filterAvailable
 
         // Update resolution toggle text
-        binding.resolutionToggle?.text = when (videoResolution) {
+        val resText = when (videoResolution) {
             VideoResolution.MAX -> "${getMaxResolutionHeight()}p"
             VideoResolution.QHD_1440P -> "1440p"
             VideoResolution.FHD_1080P -> "1080p"
             VideoResolution.SD_480P -> "480p"
         }
+        binding.resolutionToggle?.text = "Resolution: $resText"
         
         // Update framerate toggle text
-        binding.framerateToggle?.text = "${videoFrameRate} FPS"
+        binding.framerateToggle?.text = "Frame Rate: ${videoFrameRate} FPS"
 
         updateAspectRatioUI()
         updateFlashUI()
@@ -987,7 +994,8 @@ class CameraFragment : Fragment() {
     }
 
     private fun updateFilterUI() {
-        fragmentCameraBinding.filterToggle?.text = filmSimulation.displayName
+        val cleanName = filmSimulation.displayName.replace("Film ", "")
+        fragmentCameraBinding.filterToggle?.text = "Filmmodus: $cleanName"
     }
 
     private fun updateMovieToggleUI() {
@@ -1678,6 +1686,19 @@ class CameraFragment : Fragment() {
                 constraintSet.setDimensionRatio(R.id.view_finder_container, ratio)
                 constraintSet.constrainedWidth(R.id.view_finder_container, true)
                 constraintSet.constrainedHeight(R.id.view_finder_container, true)
+
+                if (aspectRatio == AspectRatio.RATIO_16_9) {
+                    val ratio43Ratio = if (needsSwap) 3f / 4f else 4f / 3f
+                    val height43 = if (ratio43Ratio > availableRatio) {
+                        (wMax / ratio43Ratio).toInt()
+                    } else {
+                        hMax
+                    }
+                    constraintSet.constrainMaxHeight(R.id.view_finder_container, height43)
+                } else {
+                    constraintSet.constrainMaxHeight(R.id.view_finder_container, Int.MAX_VALUE)
+                }
+
                 constraintSet.applyTo(fragmentCameraBinding.root as androidx.constraintlayout.widget.ConstraintLayout)
             }
         } catch (e: Exception) {
