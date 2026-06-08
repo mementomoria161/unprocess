@@ -237,23 +237,68 @@
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/movie_toggle"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="56dp"
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/mode_selection_pill"
+            android:layout_width="112dp"
             android:layout_height="56dp"
             android:layout_marginEnd="8dp"
-            android:padding="12dp"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            app:iconGravity="textStart"
-            app:iconPadding="0dp"
-            app:iconSize="22dp"
-            app:shapeAppearanceOverlay="@style/ShapeAppearance.Material3.Corner.Full" />
+            app:cardBackgroundColor="?attr/colorSecondaryContainer"
+            app:cardCornerRadius="28dp"
+            app:cardElevation="0dp"
+            app:strokeWidth="0dp"
+            android:clipToOutline="true"
+            app:contentPadding="0dp"
+            app:cardPreventCornerOverlap="false"
+            app:cardUseCompatPadding="false">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/camera_toggle"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="56dp"
+                    android:layout_height="56dp"
+                    android:padding="12dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:insetLeft="0dp"
+                    android:insetRight="0dp"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    app:icon="@drawable/ic_camera"
+                    app:iconGravity="textStart"
+                    app:iconPadding="0dp"
+                    app:iconSize="24dp"
+                    app:cornerRadius="28dp"
+                    app:strokeWidth="0dp"
+                    app:backgroundTint="@android:color/transparent" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/video_toggle"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="56dp"
+                    android:layout_height="56dp"
+                    android:padding="12dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:insetLeft="0dp"
+                    android:insetRight="0dp"
+                    android:minWidth="0dp"
+                    android:minHeight="0dp"
+                    app:icon="@drawable/ic_video"
+                    app:iconGravity="textStart"
+                    app:iconPadding="0dp"
+                    app:iconSize="24dp"
+                    app:cornerRadius="28dp"
+                    app:strokeWidth="0dp"
+                    app:backgroundTint="@android:color/transparent" />
+
+            </LinearLayout>
+
+        </com.google.android.material.card.MaterialCardView>
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/flash_toggle"
@@ -270,7 +315,7 @@
             android:minHeight="0dp"
             app:iconGravity="textStart"
             app:iconPadding="0dp"
-            app:iconSize="22dp"
+            app:iconSize="24dp"
             app:shapeAppearanceOverlay="@style/ShapeAppearance.Material3.Corner.Full" />
 
         <com.google.android.material.button.MaterialButton
@@ -288,7 +333,7 @@
             app:icon="@drawable/ic_settings"
             app:iconGravity="textStart"
             app:iconPadding="0dp"
-            app:iconSize="22dp"
+            app:iconSize="24dp"
             app:shapeAppearanceOverlay="@style/ShapeAppearance.Material3.Corner.Full" />
 
     </LinearLayout>
@@ -308,13 +353,13 @@
         android:layout_marginTop="16dp">
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/aspect_ratio_toggle"
+            android:id="@+id/filter_toggle"
             style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="wrap_content"
             android:layout_height="56dp"
             android:layout_marginBottom="8dp"
             android:layout_gravity="end"
-            android:text="@string/aspect_ratio_full"
+            android:text="@string/filter_normal"
             android:textSize="16sp"
             android:insetTop="0dp"
             android:insetBottom="0dp"
@@ -324,52 +369,9 @@
             android:minHeight="0dp"
             android:paddingStart="64dp"
             android:paddingEnd="64dp"
-            app:icon="@drawable/ic_aspect_ratio"
+            app:icon="@drawable/ic_film_mode"
             app:iconPadding="8dp"
-            app:iconGravity="start" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/resolution_toggle"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="wrap_content"
-            android:layout_height="56dp"
-            android:layout_marginBottom="8dp"
-            android:layout_gravity="end"
-            android:text="1080p"
-            android:textSize="16sp"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:visibility="gone"
-            android:paddingStart="64dp"
-            android:paddingEnd="64dp"
-            app:icon="@drawable/ic_resolution"
-            app:iconPadding="8dp"
-            app:iconGravity="start" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/framerate_toggle"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="wrap_content"
-            android:layout_height="56dp"
-            android:layout_marginBottom="8dp"
-            android:layout_gravity="end"
-            android:text="30 FPS"
-            android:textSize="16sp"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:visibility="gone"
-            android:paddingStart="64dp"
-            android:paddingEnd="64dp"
-            app:icon="@drawable/ic_frame_rate"
-            app:iconPadding="8dp"
+            app:iconSize="24dp"
             app:iconGravity="start" />
 
         <com.google.android.material.button.MaterialButton
@@ -392,6 +394,75 @@
             android:paddingEnd="64dp"
             app:icon="@drawable/ic_film_mode"
             app:iconPadding="8dp"
+            app:iconSize="24dp"
+            app:iconGravity="start" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/aspect_ratio_toggle"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="56dp"
+            android:layout_marginBottom="8dp"
+            android:layout_gravity="end"
+            android:text="@string/aspect_ratio_full"
+            android:textSize="16sp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="64dp"
+            android:paddingEnd="64dp"
+            app:icon="@drawable/ic_aspect_ratio"
+            app:iconPadding="8dp"
+            app:iconSize="24dp"
+            app:iconGravity="start" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/resolution_toggle"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="56dp"
+            android:layout_marginBottom="8dp"
+            android:layout_gravity="end"
+            android:text="1080p"
+            android:textSize="16sp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:visibility="gone"
+            android:paddingStart="64dp"
+            android:paddingEnd="64dp"
+            app:icon="@drawable/ic_resolution"
+            app:iconPadding="8dp"
+            app:iconSize="24dp"
+            app:iconGravity="start" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/framerate_toggle"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="56dp"
+            android:layout_marginBottom="8dp"
+            android:layout_gravity="end"
+            android:text="30 FPS"
+            android:textSize="16sp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:visibility="gone"
+            android:paddingStart="64dp"
+            android:paddingEnd="64dp"
+            app:icon="@drawable/ic_frame_rate"
+            app:iconPadding="8dp"
+            app:iconSize="24dp"
             app:iconGravity="start" />
 
         <com.google.android.material.button.MaterialButton
@@ -399,7 +470,6 @@
             style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="wrap_content"
             android:layout_height="56dp"
-            android:layout_marginBottom="8dp"
             android:layout_gravity="end"
             android:text="JPEG"
             android:textSize="16sp"
@@ -413,26 +483,7 @@
             android:paddingEnd="64dp"
             app:icon="@drawable/ic_file_format"
             app:iconPadding="8dp"
-            app:iconGravity="start" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/filter_toggle"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="wrap_content"
-            android:layout_height="56dp"
-            android:layout_gravity="end"
-            android:text="@string/filter_normal"
-            android:textSize="16sp"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:paddingStart="64dp"
-            android:paddingEnd="64dp"
-            app:icon="@drawable/ic_film_mode"
-            app:iconPadding="8dp"
+            app:iconSize="24dp"
             app:iconGravity="start" />
 
     </LinearLayout>

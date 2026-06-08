@@ -409,27 +409,23 @@ class CameraFragment : Fragment() {
             }
         }
 
-        fragmentCameraBinding.movieToggle?.isHapticFeedbackEnabled = false
-        fragmentCameraBinding.movieToggle?.isSoundEffectsEnabled = false
-        fragmentCameraBinding.movieToggle?.setOnClickListener {
-            if (isRecordingVideo) return@setOnClickListener
-            isVideoMode = !isVideoMode
+        fragmentCameraBinding.cameraToggle?.isHapticFeedbackEnabled = false
+        fragmentCameraBinding.cameraToggle?.isSoundEffectsEnabled = false
+        fragmentCameraBinding.cameraToggle?.setOnClickListener {
+            if (isRecordingVideo || isProcessing) return@setOnClickListener
             if (isVideoMode) {
-                savedPhotoFilmSimulation = filmSimulation
-                filmSimulation = FilmSimulation.NORMAL
-                aspectRatio = videoAspectRatio
-                if (videoPreset == VideoPreset.SUPER8) {
-                    coerceSuper8VideoSettings()
-                }
-            } else {
-                filmSimulation = savedPhotoFilmSimulation
-                aspectRatio = photoAspectRatio
+                it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                toggleCameraVideoMode(false)
             }
-            updateSettingsUI()
-            updateCaptureButtonForState()
-            saveSettings()
-            if (!isShowingDone) {
-                initializeCamera()
+        }
+
+        fragmentCameraBinding.videoToggle?.isHapticFeedbackEnabled = false
+        fragmentCameraBinding.videoToggle?.isSoundEffectsEnabled = false
+        fragmentCameraBinding.videoToggle?.setOnClickListener {
+            if (isRecordingVideo || isProcessing) return@setOnClickListener
+            if (!isVideoMode) {
+                it.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                toggleCameraVideoMode(true)
             }
         }
 
@@ -777,12 +773,12 @@ class CameraFragment : Fragment() {
         val overlay = binding.settingsDimOverlay ?: return
         
         val toggles = listOfNotNull(
+            binding.filterToggle,
+            binding.presetToggle,
             binding.aspectRatioToggle,
             binding.resolutionToggle,
             binding.framerateToggle,
-            binding.presetToggle,
-            binding.modeToggle,
-            binding.filterToggle
+            binding.modeToggle
         ).filter { it.visibility == View.VISIBLE }
         
         if (toggles.isEmpty()) {
@@ -901,8 +897,6 @@ class CameraFragment : Fragment() {
             binding.resolutionToggle?.visibility = View.VISIBLE
             binding.framerateToggle?.visibility = View.VISIBLE
             binding.presetToggle?.visibility = View.VISIBLE
-            // The film-simulation filter is a photo-only control; in video the
-            // preset toggle takes its place.
             binding.filterToggle?.visibility = View.GONE
         } else {
             binding.modeToggle?.visibility = View.VISIBLE
@@ -1000,16 +994,57 @@ class CameraFragment : Fragment() {
 
     private fun updateMovieToggleUI() {
         val binding = _fragmentCameraBinding ?: return
-        val iconRes = if (isVideoMode) {
-            R.drawable.ic_video
-        } else {
-            R.drawable.ic_camera
-        }
-        binding.movieToggle?.text = ""
-        binding.movieToggle?.setIconResource(iconRes)
         val movieToggleEnabled = !isRecordingVideo && !isProcessing
-        binding.movieToggle?.isEnabled = movieToggleEnabled
-        binding.movieToggle?.let { setButtonActiveStyle(it, movieToggleEnabled) }
+        
+        binding.cameraToggle?.isEnabled = movieToggleEnabled
+        binding.videoToggle?.isEnabled = movieToggleEnabled
+        
+        val activeColor = getOnPrimaryColor()
+        val inactiveColor = getOnSecondaryContainerColor()
+        
+        if (!isVideoMode) {
+            // Camera is selected
+            binding.cameraToggle?.backgroundTintList = ColorStateList.valueOf(getPrimaryColor())
+            binding.cameraToggle?.iconTint = ColorStateList.valueOf(activeColor)
+            
+            // Video is unselected
+            binding.videoToggle?.backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
+            binding.videoToggle?.iconTint = ColorStateList.valueOf(inactiveColor)
+        } else {
+            // Video is selected
+            if (isRecordingVideo) {
+                // If recording, movieBlinkAnimator handles its background/icon tint
+            } else {
+                binding.videoToggle?.backgroundTintList = ColorStateList.valueOf(getPrimaryColor())
+                binding.videoToggle?.iconTint = ColorStateList.valueOf(activeColor)
+            }
+            
+            // Camera is unselected
+            binding.cameraToggle?.backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
+            binding.cameraToggle?.iconTint = ColorStateList.valueOf(inactiveColor)
+        }
+    }
+
+    private fun toggleCameraVideoMode(toVideoMode: Boolean) {
+        if (isRecordingVideo) return
+        isVideoMode = toVideoMode
+        if (isVideoMode) {
+            savedPhotoFilmSimulation = filmSimulation
+            filmSimulation = FilmSimulation.NORMAL
+            aspectRatio = videoAspectRatio
+            if (videoPreset == VideoPreset.SUPER8) {
+                coerceSuper8VideoSettings()
+            }
+        } else {
+            filmSimulation = savedPhotoFilmSimulation
+            aspectRatio = photoAspectRatio
+        }
+        updateSettingsUI()
+        updateCaptureButtonForState()
+        saveSettings()
+        if (!isShowingDone) {
+            initializeCamera()
+        }
     }
 
     private fun getMaxResolutionHeight(): Int {
@@ -1386,10 +1421,10 @@ class CameraFragment : Fragment() {
                     toggleSettingsMode()
                 }
                 
-                // Start pulsing red for movieToggle
+                // Start pulsing red for videoToggle
                 movieBlinkAnimator?.cancel()
                 val redColor = getErrorColor()
-                val defaultColor = Color.parseColor("#33FFFFFF")
+                val defaultColor = getPrimaryColor()
                 movieBlinkAnimator = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
                     duration = 3000
                     repeatMode = android.animation.ValueAnimator.RESTART
@@ -1421,11 +1456,11 @@ class CameraFragment : Fragment() {
                         ) as Int
                         val iconColor = android.animation.ArgbEvaluator().evaluate(
                             intensity,
-                            Color.GRAY,
+                            getOnPrimaryColor(),
                             Color.WHITE
                         ) as Int
                         
-                        _fragmentCameraBinding?.movieToggle?.let { button ->
+                        _fragmentCameraBinding?.videoToggle?.let { button ->
                             button.backgroundTintList = ColorStateList.valueOf(color)
                             button.iconTint = ColorStateList.valueOf(iconColor)
                         }
@@ -1619,16 +1654,48 @@ class CameraFragment : Fragment() {
         }
     }
 
+    private fun getSecondaryContainerColor(): Int {
+        val typedValue = android.util.TypedValue()
+        val theme = requireContext().theme
+        return if (theme.resolveAttribute(com.google.android.material.R.attr.colorSecondaryContainer, typedValue, true)) {
+            typedValue.data
+        } else {
+            Color.parseColor("#33FFFFFF")
+        }
+    }
+
+    private fun getOnPrimaryColor(): Int {
+        val typedValue = android.util.TypedValue()
+        val theme = requireContext().theme
+        return if (theme.resolveAttribute(com.google.android.material.R.attr.colorOnPrimary, typedValue, true)) {
+            typedValue.data
+        } else {
+            Color.WHITE
+        }
+    }
+
+    private fun getOnSecondaryContainerColor(): Int {
+        val typedValue = android.util.TypedValue()
+        val theme = requireContext().theme
+        return if (theme.resolveAttribute(com.google.android.material.R.attr.colorOnSecondaryContainer, typedValue, true)) {
+            typedValue.data
+        } else {
+            Color.GRAY
+        }
+    }
+
     private fun setButtonActiveStyle(button: com.google.android.material.button.MaterialButton?, active: Boolean) {
         if (button == null) return
         if (active) {
+            val textIconColor = getOnPrimaryColor()
             button.backgroundTintList = ColorStateList.valueOf(getPrimaryColor())
-            button.setTextColor(Color.BLACK)
-            button.iconTint = ColorStateList.valueOf(Color.BLACK)
+            button.setTextColor(textIconColor)
+            button.iconTint = ColorStateList.valueOf(textIconColor)
         } else {
-            button.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#33FFFFFF"))
-            button.setTextColor(Color.GRAY)
-            button.iconTint = ColorStateList.valueOf(Color.GRAY)
+            val textIconColor = getOnSecondaryContainerColor()
+            button.backgroundTintList = ColorStateList.valueOf(getSecondaryContainerColor())
+            button.setTextColor(textIconColor)
+            button.iconTint = ColorStateList.valueOf(textIconColor)
         }
     }
 
@@ -1896,6 +1963,16 @@ class CameraFragment : Fragment() {
                 else -> R.string.capture
             }
         )
+        
+        if (isProcessing) {
+            button.backgroundTintList = ColorStateList.valueOf(getSecondaryContainerColor())
+            button.setTextColor(getOnSecondaryContainerColor())
+            button.iconTint = ColorStateList.valueOf(getOnSecondaryContainerColor())
+        } else {
+            button.backgroundTintList = ColorStateList.valueOf(getPrimaryColor())
+            button.setTextColor(getOnPrimaryColor())
+            button.iconTint = ColorStateList.valueOf(getOnPrimaryColor())
+        }
     }
 
     private fun releaseResources() {
