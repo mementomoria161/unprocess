@@ -858,9 +858,10 @@ class AnalogLookRenderer private constructor(
                 float jit = (hash(vec2(line, uSeed)) - 0.5) * 0.002
                           + sin(vuv.y * 9.0 + uTime * 1.1) * 0.0006;
 
-                // --- Vertical-hold bounce: rare one-frame vertical jump ---
+                // --- Vertical-hold bounce: rare one-frame vertical jump
+                // (~0.75% of frames) ---
                 float jv = 0.0;
-                if (hash(vec2(uSeed, 77.0)) > 0.985) {
+                if (hash(vec2(uSeed, 77.0)) > 0.9925) {
                     jv = (hash(vec2(uSeed, 78.0)) - 0.5) * 0.012;
                 }
 
@@ -872,10 +873,10 @@ class AnalogLookRenderer private constructor(
                 }
 
                 // --- Tracking wrinkle: a distortion band that occasionally
-                // scrolls down through the picture (per 7 s window) ---
+                // scrolls down through the picture (~19% of 7 s windows) ---
                 float ep = floor(uTime / 7.0);
                 float trk = 0.0;
-                if (hash(vec2(ep, 31.0)) > 0.62) {
+                if (hash(vec2(ep, 31.0)) > 0.81) {
                     float trkY = 1.1 - fract(uTime / 7.0) * 1.3;
                     float trkW = 0.02 + 0.025 * hash(vec2(ep, 37.0));
                     trk = 1.0 - smoothstep(0.0, trkW, abs(vuv.y - trkY));
@@ -930,9 +931,10 @@ class AnalogLookRenderer private constructor(
                 // The tracking band also rips the colour out.
                 col = mix(col, vec3(lum(col)), trk * 0.6);
 
-                // --- Dropout "pop lines": lost FM for part of a line ---
+                // --- Dropout "pop lines": lost FM for part of a line
+                // (~0.075% of line pairs per frame) ---
                 float dline = floor(line / 2.0);
-                if (hash(vec2(dline, floor(uSeed * 17.0))) > 0.9985) {
+                if (hash(vec2(dline, floor(uSeed * 17.0))) > 0.99925) {
                     float x0 = hash(vec2(dline, uSeed + 3.3)) * 0.9;
                     float len = 0.04
                         + 0.6 * hash(vec2(dline, uSeed + 5.1)) * hash(vec2(dline, uSeed + 6.2));

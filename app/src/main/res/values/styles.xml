@@ -25,6 +25,18 @@
         <!-- <item name="android:windowTranslucentStatus">true</item> -->
         <!-- <item name="android:windowTranslucentNavigation">true</item> -->
         <item name="android:windowBackground">#1A1A1A</item>
+        <!-- App-wide font. Plain TextViews pick it up from the theme-level
+             fontFamily; MaterialButtons take theirs from
+             textAppearanceLabelLarge, which has to be overridden separately
+             because the Material3 default sets its own fontFamily. -->
+        <item name="android:fontFamily">@font/tussilago_light_italic</item>
+        <item name="fontFamily">@font/tussilago_light_italic</item>
+        <item name="textAppearanceLabelLarge">@style/AppTextAppearance.LabelLarge</item>
+    </style>
+
+    <style name="AppTextAppearance.LabelLarge" parent="TextAppearance.Material3.LabelLarge">
+        <item name="android:fontFamily">@font/tussilago_light_italic</item>
+        <item name="fontFamily">@font/tussilago_light_italic</item>
     </style>
 
 </resources>

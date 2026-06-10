@@ -716,6 +716,7 @@ class CameraFragment : Fragment() {
                 com.google.android.material.R.attr.materialButtonOutlinedStyle,
             ).apply {
                 text = entry.label
+                maxLines = 1
                 layoutParams = LinearLayout.LayoutParams(44.dpToPx(), 44.dpToPx()).apply {
                     setMargins(4.dpToPx(), 4.dpToPx(), 4.dpToPx(), 4.dpToPx())
                 }
