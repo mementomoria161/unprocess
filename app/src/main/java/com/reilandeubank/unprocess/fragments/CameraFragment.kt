@@ -385,7 +385,11 @@ class CameraFragment : Fragment() {
             updateFlashUI()
             updateSettingsUI()
             saveSettings()
-            
+
+            // While the review overlay is up the preview is intentionally
+            // stopped — the new flash mode is applied by resumePreview().
+            if (isShowingDone) return@setOnClickListener
+
             // Try to update the existing session if possible
             try {
                 if (::session.isInitialized) {
@@ -530,18 +534,14 @@ class CameraFragment : Fragment() {
                 height: Int
             ) = Unit
             override fun surfaceCreated(holder: SurfaceHolder) {
-                // Wait for layout to settle before initializing camera to prevent stretching
-                view.postDelayed({
-                    if (_fragmentCameraBinding != null && isAdded && !isShowingDone) {
-                        initializeCamera()
-                        // Run it a second time after a short delay to ensure surface sizes are fully applied
-                        view.postDelayed({
-                            if (_fragmentCameraBinding != null && isAdded && !isShowingDone) {
-                                initializeCamera()
-                            }
-                        }, 300L)
-                    }
-                }, 250L)
+                // Initialize immediately: the container/viewfinder geometry is
+                // derived from the selected aspect ratio (not from layout
+                // timing), and the preview buffer has a fixed size the
+                // compositor scales correctly regardless of when layout
+                // settles — so no settle delays or double initialization.
+                if (_fragmentCameraBinding != null && isAdded && !isShowingDone) {
+                    initializeCamera()
+                }
             }
         })
 
@@ -563,7 +563,7 @@ class CameraFragment : Fragment() {
             binding.modeToggle?.let { setButtonActiveStyle(it, false) }
         } else {
             binding.modeToggle?.text = "File Format ${outputFormat.name}"
-            val modeToggleAvailable = !isProcessing
+            val modeToggleAvailable = !isProcessing && !isShowingDone
             binding.modeToggle?.isEnabled = modeToggleAvailable
             binding.modeToggle?.let { setButtonActiveStyle(it, modeToggleAvailable) }
         }
@@ -889,8 +889,10 @@ class CameraFragment : Fragment() {
         
         // Settings gear button is highlighted (active) when settings mode is OFF (inactive),
         // and grayed out (inactive) when settings mode is ON (active).
-        // Disabled during processing or video recording.
-        val settingsAvailable = !isProcessing && !isRecordingVideo
+        // Disabled during processing, video recording, and while the review
+        // overlay is up (changing session-affecting settings there would
+        // desync them from the still-configured camera session).
+        val settingsAvailable = !isProcessing && !isRecordingVideo && !isShowingDone
         binding.settingsToggle?.isEnabled = settingsAvailable
         binding.settingsToggle?.let { setButtonActiveStyle(it, !isSettingsMode && settingsAvailable) }
         
@@ -937,11 +939,11 @@ class CameraFragment : Fragment() {
 
         // The analogue presets are locked to 4:3, so the aspect-ratio toggle
         // is disabled there.
-        val aspectAvailable = !isProcessing && !isRecordingVideo && !usesGlPipeline()
+        val aspectAvailable = !isProcessing && !isRecordingVideo && !isShowingDone && !usesGlPipeline()
         binding.aspectRatioToggle?.isEnabled = aspectAvailable
         setButtonActiveStyle(binding.aspectRatioToggle, aspectAvailable)
 
-        val videoSettingsAvailable = !isProcessing && !isRecordingVideo && isVideoMode
+        val videoSettingsAvailable = !isProcessing && !isRecordingVideo && !isShowingDone && isVideoMode
 
         // SUPER8/VHS lock both resolution (encoder-safe 480p) and frame rate
         // (18/25 fps), so those toggles are disabled while a preset is active.
@@ -973,7 +975,7 @@ class CameraFragment : Fragment() {
         // the saved image processed with the old or the new filter?).
         //
         // Also disabled during video recording.
-        val filterAvailable = !isProcessing && !isRecordingVideo && !isVideoMode && (outputFormat == OutputFormat.JPEG || outputFormat == OutputFormat.WEBP)
+        val filterAvailable = !isProcessing && !isRecordingVideo && !isShowingDone && !isVideoMode && (outputFormat == OutputFormat.JPEG || outputFormat == OutputFormat.WEBP)
         setButtonActiveStyle(binding.filterToggle, filterAvailable)
         binding.filterToggle?.isEnabled = filterAvailable
 
@@ -1003,7 +1005,7 @@ class CameraFragment : Fragment() {
 
     private fun updateMovieToggleUI() {
         val binding = _fragmentCameraBinding ?: return
-        val movieToggleEnabled = !isRecordingVideo && !isProcessing
+        val movieToggleEnabled = !isRecordingVideo && !isProcessing && !isShowingDone
         
         binding.cameraToggle?.isEnabled = movieToggleEnabled
         binding.videoToggle?.isEnabled = movieToggleEnabled
@@ -1415,9 +1417,21 @@ class CameraFragment : Fragment() {
                 if (usesGlPipeline()) {
                     val renderInput = analogRenderer?.inputSurfaceOrNull()
                         ?: throw RuntimeException("Analog look renderer unavailable")
-                    // Encoder first, then point the renderer at the encoder input
-                    // surface, then let the camera feed the renderer's
-                    // SurfaceTexture (camera → GL → encoder).
+                    // Feed the renderer's SurfaceTexture FIRST so camera frames
+                    // are already flowing when the encoder starts — otherwise
+                    // the clip begins with a stretch of audio-only before the
+                    // first video frame (a visibly choppy start). The renderer
+                    // safely consumes (and drops) frames while not recording.
+                    // The encoder itself still starts BEFORE the renderer
+                    // attaches its EGL surface, preserving the stable
+                    // recorder-then-EGL ordering.
+                    val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
+                        addTarget(fragmentCameraBinding.viewFinder.holder.surface)
+                        addTarget(renderInput)
+                        applyCaptureRequestSettings(this)
+                    }
+                    session.setRepeatingRequest(captureRequest.build(), null, cameraHandler)
+
                     mediaRecorder?.start()
                     // The GL stage already delivers a display-upright (natural
                     // portrait) frame, so we only need to add the device-rotation
@@ -1427,12 +1441,6 @@ class CameraFragment : Fragment() {
                     val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
                     val encoderRotation = ((videoRotation - sensorOrientation) + 360) % 360
                     persistentSurface?.let { analogRenderer?.startEncoder(it, encoderRotation) }
-                    val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
-                        addTarget(fragmentCameraBinding.viewFinder.holder.surface)
-                        addTarget(renderInput)
-                        applyCaptureRequestSettings(this)
-                    }
-                    session.setRepeatingRequest(captureRequest.build(), null, cameraHandler)
                 } else {
                     // Update the repeating request to target both the viewfinder and the persistent surface.
                     val captureRequest = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD).apply {
@@ -1739,73 +1747,57 @@ class CameraFragment : Fragment() {
 
     private fun updateViewfinderRatio() {
         try {
-            val ch = characteristics
-            val sensorOrientation = ch.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
-            val streamMap = ch.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            if (streamMap != null) {
-                val needsSwap = (sensorOrientation == 90 || sensorOrientation == 270)
-                val (targetW, targetH) = when (aspectRatio) {
-                    AspectRatio.RATIO_1_1 -> Pair(1, 1)
-                    AspectRatio.RATIO_16_9 -> if (needsSwap) Pair(9, 16) else Pair(16, 9)
-                    AspectRatio.RATIO_4_3 -> {
-                        if (isVideoMode) {
-                            val videoSizes = streamMap.getOutputSizes(android.media.MediaRecorder::class.java)
-                            val videoSize = chooseVideoSize(videoSizes)
-                            val displayWidth = if (needsSwap) videoSize.height else videoSize.width
-                            val displayHeight = if (needsSwap) videoSize.width else videoSize.height
-                            Pair(displayWidth, displayHeight)
-                        } else {
-                            val supportedSizes = streamMap.getOutputSizes(args.pixelFormat)
-                            val format = if (supportedSizes.isNullOrEmpty()) ImageFormat.JPEG else args.pixelFormat
-                            val finalSizes = if (format == args.pixelFormat) supportedSizes else streamMap.getOutputSizes(format)
-                            val size = finalSizes?.maxByOrNull { it.height * it.width }
-                            if (size != null) {
-                                val displayWidth = if (needsSwap) size.height else size.width
-                                val displayHeight = if (needsSwap) size.width else size.height
-                                Pair(displayWidth, displayHeight)
-                            } else {
-                                if (needsSwap) Pair(3, 4) else Pair(4, 3)
-                            }
-                        }
-                    }
-                }
-
-                val insets = androidx.core.view.ViewCompat.getRootWindowInsets(fragmentCameraBinding.root)
-                val systemBars = insets?.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
-                val bottomInset = systemBars?.bottom ?: 0
-                val wMax = maxOf(1, resources.displayMetrics.widthPixels - 32.dpToPx())
-                val hMax = maxOf(1, resources.displayMetrics.heightPixels - 311.dpToPx() - bottomInset)
-                val availableRatio = wMax.toFloat() / hMax.toFloat()
-                val targetRatio = targetW.toFloat() / targetH.toFloat()
-
-                val ratio = if (targetRatio > availableRatio) {
-                    "H,$targetW:$targetH"
-                } else {
-                    "W,$targetW:$targetH"
-                }
-
-                Log.d(TAG, "updateViewfinderRatio | container=$ratio (target=$targetW:$targetH, availableRatio=$availableRatio, targetRatio=$targetRatio)")
-
-                val constraintSet = androidx.constraintlayout.widget.ConstraintSet()
-                constraintSet.clone(fragmentCameraBinding.root as androidx.constraintlayout.widget.ConstraintLayout)
-                constraintSet.setDimensionRatio(R.id.view_finder_container, ratio)
-                constraintSet.constrainedWidth(R.id.view_finder_container, true)
-                constraintSet.constrainedHeight(R.id.view_finder_container, true)
-
-                if (aspectRatio == AspectRatio.RATIO_16_9) {
-                    val ratio43Ratio = if (needsSwap) 3f / 4f else 4f / 3f
-                    val height43 = if (ratio43Ratio > availableRatio) {
-                        (wMax / ratio43Ratio).toInt()
-                    } else {
-                        hMax
-                    }
-                    constraintSet.constrainMaxHeight(R.id.view_finder_container, height43)
-                } else {
-                    constraintSet.constrainMaxHeight(R.id.view_finder_container, Int.MAX_VALUE)
-                }
-
-                constraintSet.applyTo(fragmentCameraBinding.root as androidx.constraintlayout.widget.ConstraintLayout)
+            val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
+            val needsSwap = (sensorOrientation == 90 || sensorOrientation == 270)
+            // The container is sized purely from the SELECTED aspect ratio,
+            // never from per-lens stream sizes: different lenses report
+            // slightly different native sizes, and deriving the ratio from
+            // them moved/resized the container on every lens switch and
+            // between photo and video mode. The AutoFitSurfaceView inside
+            // center-crops any small mismatch between the camera buffer and
+            // this container, so the image is never stretched — at most
+            // minimally cropped.
+            val (targetW, targetH) = when (aspectRatio) {
+                AspectRatio.RATIO_1_1 -> Pair(1, 1)
+                AspectRatio.RATIO_16_9 -> if (needsSwap) Pair(9, 16) else Pair(16, 9)
+                AspectRatio.RATIO_4_3 -> if (needsSwap) Pair(3, 4) else Pair(4, 3)
             }
+
+            val insets = androidx.core.view.ViewCompat.getRootWindowInsets(fragmentCameraBinding.root)
+            val systemBars = insets?.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            val bottomInset = systemBars?.bottom ?: 0
+            val wMax = maxOf(1, resources.displayMetrics.widthPixels - 32.dpToPx())
+            val hMax = maxOf(1, resources.displayMetrics.heightPixels - 311.dpToPx() - bottomInset)
+            val availableRatio = wMax.toFloat() / hMax.toFloat()
+            val targetRatio = targetW.toFloat() / targetH.toFloat()
+
+            val ratio = if (targetRatio > availableRatio) {
+                "H,$targetW:$targetH"
+            } else {
+                "W,$targetW:$targetH"
+            }
+
+            Log.d(TAG, "updateViewfinderRatio | container=$ratio (target=$targetW:$targetH, availableRatio=$availableRatio, targetRatio=$targetRatio)")
+
+            val constraintSet = androidx.constraintlayout.widget.ConstraintSet()
+            constraintSet.clone(fragmentCameraBinding.root as androidx.constraintlayout.widget.ConstraintLayout)
+            constraintSet.setDimensionRatio(R.id.view_finder_container, ratio)
+            constraintSet.constrainedWidth(R.id.view_finder_container, true)
+            constraintSet.constrainedHeight(R.id.view_finder_container, true)
+
+            if (aspectRatio == AspectRatio.RATIO_16_9) {
+                val ratio43Ratio = if (needsSwap) 3f / 4f else 4f / 3f
+                val height43 = if (ratio43Ratio > availableRatio) {
+                    (wMax / ratio43Ratio).toInt()
+                } else {
+                    hMax
+                }
+                constraintSet.constrainMaxHeight(R.id.view_finder_container, height43)
+            } else {
+                constraintSet.constrainMaxHeight(R.id.view_finder_container, Int.MAX_VALUE)
+            }
+
+            constraintSet.applyTo(fragmentCameraBinding.root as androidx.constraintlayout.widget.ConstraintLayout)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to update viewfinder ratio constraints", e)
         }
@@ -1863,20 +1855,13 @@ class CameraFragment : Fragment() {
                     thumbnail.alpha = 1.0f
                     // Apply a dark color filter (80% black) on top of the opaque frozen preview image
                     thumbnail.setColorFilter(Color.argb(204, 0, 0, 0))
-                    
-                    // Adjust viewfinder container ratio to match the frozen thumbnail aspect ratio
-                    val ratio = "${state.frozenBitmap.width}:${state.frozenBitmap.height}"
-                    val constraintSet = androidx.constraintlayout.widget.ConstraintSet()
-                    constraintSet.clone(binding.root as androidx.constraintlayout.widget.ConstraintLayout)
-                    constraintSet.setDimensionRatio(R.id.view_finder_container, ratio)
-                    constraintSet.applyTo(binding.root as androidx.constraintlayout.widget.ConstraintLayout)
                 } else {
                     thumbnail.visibility = View.GONE
                     thumbnail.setImageDrawable(null)
                     thumbnail.clearColorFilter()
                 }
                 oldFrozen?.takeIf { it !== state.frozenBitmap && !it.isRecycled }?.recycle()
-                
+
                 overlay.visibility = View.VISIBLE
                 overlay.alpha = 0f
                 overlay.animate().alpha(1f).setDuration(180L).start()
@@ -1891,15 +1876,13 @@ class CameraFragment : Fragment() {
                 val oldBitmap = doneThumbnail
                 doneThumbnail = state.thumbnail
                 if (state.thumbnail != null) {
+                    // The container's ratio is deliberately NOT changed here:
+                    // it stays exactly where the live preview was, and the
+                    // result is shown fitCenter inside it. (Mutating the
+                    // container to the thumbnail ratio made the whole layout
+                    // jump on every capture.)
                     thumbnail.setImageBitmap(state.thumbnail)
                     thumbnail.visibility = View.VISIBLE
-                    
-                    // Adjust viewfinder container ratio to match the captured thumbnail aspect ratio
-                    val ratio = "${state.thumbnail.width}:${state.thumbnail.height}"
-                    val constraintSet = androidx.constraintlayout.widget.ConstraintSet()
-                    constraintSet.clone(binding.root as androidx.constraintlayout.widget.ConstraintLayout)
-                    constraintSet.setDimensionRatio(R.id.view_finder_container, ratio)
-                    constraintSet.applyTo(binding.root as androidx.constraintlayout.widget.ConstraintLayout)
                 } else {
                     // Decoder failed (typical for DNG-only on some devices).
                     // Keep the dim — there's just no preview image to show.
@@ -1907,34 +1890,29 @@ class CameraFragment : Fragment() {
                     thumbnail.visibility = View.GONE
                 }
                 oldBitmap?.takeIf { it !== state.thumbnail && !it.isRecycled }?.recycle()
-                
+
                 frozenThumbnail?.takeIf { !it.isRecycled }?.recycle()
                 frozenThumbnail = null
-                
+
+                // Freeze the camera while the user reviews the result. Nothing
+                // live is visible behind the opaque overlay anyway, and not
+                // running the ISP/preview pipeline saves a meaningful amount
+                // of power. resumePreview() restarts it on "Take new".
+                try {
+                    if (::session.isInitialized) session.stopRepeating()
+                } catch (exc: Exception) {
+                    Log.w(TAG, "stopRepeating for review failed: ${exc.message}")
+                }
+
                 if (isVideoMode) {
-                    binding.captureProgressPlayButton?.visibility = View.VISIBLE
-                    binding.captureProgressPlayButton?.setOnClickListener {
-                        binding.captureProgressPlayButton.visibility = View.GONE
-                        binding.captureProgressThumbnail?.visibility = View.GONE
-                        binding.captureProgressVideo?.apply {
-                            visibility = View.VISIBLE
-                            currentVideoFile?.let { file ->
-                                setVideoPath(file.absolutePath)
-                                start()
-                            }
-                        }
-                    }
-                    binding.captureProgressVideo?.setOnCompletionListener {
-                        binding.captureProgressVideo.visibility = View.GONE
-                        binding.captureProgressThumbnail?.visibility = View.VISIBLE
-                        binding.captureProgressPlayButton.visibility = View.VISIBLE
-                    }
+                    setupVideoReviewPlayback(binding)
                 } else {
                     binding.captureProgressPlayButton?.visibility = View.GONE
                 }
 
                 isShowingDone = true
                 updateCaptureButtonForState()
+                updateSettingsUI()
             }
             is CaptureProgress.Failed -> {
                 // Show dim briefly then bail; caller schedules hideProgress.
@@ -1964,10 +1942,13 @@ class CameraFragment : Fragment() {
         thumbnail.setImageDrawable(null)
         thumbnail.alpha = 1.0f
         thumbnail.clearColorFilter()
-        
+
         binding.captureProgressVideo?.apply {
-            if (isPlaying) {
-                stopPlayback()
+            setOnPreparedListener(null)
+            setOnCompletionListener(null)
+            // stopPlayback also releases a merely-paused MediaPlayer.
+            try { stopPlayback() } catch (exc: Exception) {
+                Log.w(TAG, "stopPlayback failed: ${exc.message}")
             }
             visibility = View.GONE
         }
@@ -1979,9 +1960,106 @@ class CameraFragment : Fragment() {
         frozenThumbnail = null
         isShowingDone = false
         updateCaptureButtonForState()
-        
-        // Restore/start camera feed preview
-        initializeCamera()
+        updateSettingsUI()
+
+        // Restore the live preview. The session is usually still fully
+        // configured (it was only stopped for the review overlay), so a
+        // repeating request is all that's needed — full re-initialization
+        // only happens as a fallback.
+        resumePreview()
+    }
+
+    /**
+     * Restarts the repeating preview request on the existing session. Falls
+     * back to a full [initializeCamera] if the session/device is gone (e.g.
+     * the app was stopped while the review overlay was up).
+     */
+    private fun resumePreview() {
+        try {
+            if (::session.isInitialized && ::camera.isInitialized && !isCameraClosed) {
+                val template = if (isVideoMode) CameraDevice.TEMPLATE_RECORD else CameraDevice.TEMPLATE_PREVIEW
+                val captureRequest = camera.createCaptureRequest(template).apply {
+                    addTarget(fragmentCameraBinding.viewFinder.holder.surface)
+                    applyCaptureRequestSettings(this)
+                }
+                session.setRepeatingRequest(captureRequest.build(), null, cameraHandler)
+            } else {
+                initializeCamera()
+            }
+        } catch (exc: Exception) {
+            Log.w(TAG, "resumePreview failed, re-initializing camera", exc)
+            initializeCamera()
+        }
+    }
+
+    /**
+     * Wires the review overlay's play button + VideoView for the just-recorded
+     * clip. Two quirks this handles explicitly:
+     *
+     *  - The VideoView is a SurfaceView; when it becomes visible its surface
+     *    is transparent until the first decoded frame arrives, exposing the
+     *    viewfinder surface behind the overlay (a brief "live preview flash"
+     *    on Play). The thumbnail therefore stays on top until the player
+     *    reports MEDIA_INFO_VIDEO_RENDERING_START.
+     *  - Pause/resume: tapping the playing video pauses it (play button
+     *    reappears); the play button resumes a paused clip instead of
+     *    restarting it.
+     */
+    private fun setupVideoReviewPlayback(binding: FragmentCameraBinding) {
+        val video = binding.captureProgressVideo ?: return
+        val playButton = binding.captureProgressPlayButton ?: return
+
+        playButton.visibility = View.VISIBLE
+        // Composite the playback surface above the viewfinder surface.
+        video.setZOrderMediaOverlay(true)
+
+        video.setOnClickListener {
+            if (video.isPlaying) {
+                video.pause()
+                playButton.visibility = View.VISIBLE
+            }
+        }
+
+        playButton.setOnClickListener {
+            playButton.visibility = View.GONE
+            // Paused mid-clip → just resume.
+            if (video.visibility == View.VISIBLE && video.currentPosition > 0 && !video.isPlaying) {
+                video.start()
+                return@setOnClickListener
+            }
+            // Fresh start. Keep the thumbnail covering the surface until the
+            // first video frame is actually rendered.
+            video.visibility = View.VISIBLE
+            video.setOnPreparedListener { mp ->
+                mp.setOnInfoListener { _, what, _ ->
+                    if (what == android.media.MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
+                        _fragmentCameraBinding?.captureProgressThumbnail?.visibility = View.GONE
+                        true
+                    } else {
+                        false
+                    }
+                }
+                mp.start()
+                // Safety net for players that never emit RENDERING_START.
+                video.postDelayed({
+                    if (video.isPlaying) {
+                        _fragmentCameraBinding?.captureProgressThumbnail?.visibility = View.GONE
+                    }
+                }, 600L)
+            }
+            val uri = videoUri
+            if (uri != null) {
+                video.setVideoURI(uri)
+            } else {
+                currentVideoFile?.let { file -> video.setVideoPath(file.absolutePath) }
+            }
+        }
+
+        video.setOnCompletionListener {
+            video.visibility = View.GONE
+            _fragmentCameraBinding?.captureProgressThumbnail?.visibility = View.VISIBLE
+            playButton.visibility = View.VISIBLE
+        }
     }
 
     /** Toggles the capture button label between "Capture" and "Take new"
@@ -2258,25 +2336,32 @@ class CameraFragment : Fragment() {
                     } else {
                         releaseResources()
                     }
-                    
-                    // Wait a bit for the system to settle
-                    kotlinx.coroutines.delay(250)
-                    
+
                     if (isVideoMode && persistentSurface == null) {
                         persistentSurface = android.media.MediaCodec.createPersistentInputSurface()
                     }
-                    
-                    try {
-                        camera = openCamera(cameraManager, cameraToOpen, cameraHandler)
+
+                    // Open right away (no settle delay — that cost 250 ms on
+                    // every cold start and lens switch). If the previous
+                    // device is still releasing, retry once briefly before
+                    // falling back to the logical parent camera.
+                    camera = try {
+                        openCamera(cameraManager, cameraToOpen, cameraHandler)
                     } catch (exc: Exception) {
-                        Log.e(TAG, "Failed to open camera $cameraToOpen, trying fallback", exc)
-                        val fallbackId = physicalToLogicalMap[currentCameraId]
-                        if (fallbackId != null && fallbackId != currentCameraId) {
-                            currentCameraId = fallbackId
-                            camera = openCamera(cameraManager, currentCameraId, cameraHandler)
-                            updateLensHighlight()
-                        } else {
-                            throw exc
+                        Log.w(TAG, "Failed to open camera $cameraToOpen, retrying once", exc)
+                        kotlinx.coroutines.delay(200)
+                        try {
+                            openCamera(cameraManager, cameraToOpen, cameraHandler)
+                        } catch (exc2: Exception) {
+                            Log.e(TAG, "Failed to open camera $cameraToOpen, trying fallback", exc2)
+                            val fallbackId = physicalToLogicalMap[currentCameraId]
+                            if (fallbackId != null && fallbackId != currentCameraId) {
+                                currentCameraId = fallbackId
+                                updateLensHighlight()
+                                openCamera(cameraManager, currentCameraId, cameraHandler)
+                            } else {
+                                throw exc2
+                            }
                         }
                     }
                 } else {
@@ -2431,11 +2516,6 @@ class CameraFragment : Fragment() {
                 val facingFrontPreview = characteristics.get(CameraCharacteristics.LENS_FACING) ==
                         CameraCharacteristics.LENS_FACING_FRONT
                 Log.d(TAG, "PREVIEW DIAG | camera=$currentCameraId facing=${if (facingFrontPreview) "FRONT" else "BACK"} sensor=${sensorOrientation}° deviceDisplay=${deviceRotation}° swap=$needsSwap | buffer=${previewSize.width}x${previewSize.height} viewAspect=$displayWidth:$displayHeight")
-
-                if (!needsReopen) {
-                    // Yield the main thread to let the layout pass complete and surface resize
-                    kotlinx.coroutines.delay(250)
-                }
 
                 // The "record" target for video: in SUPER8/VHS it's the renderer's
                 // SurfaceTexture (camera → GL → encoder); in NORMAL it's the
