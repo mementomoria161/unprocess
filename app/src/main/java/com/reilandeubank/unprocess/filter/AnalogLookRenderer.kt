@@ -20,13 +20,25 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * OpenGL ES 2.0 stage that bakes a Super-8 film look into the recorded video.
+ * The analogue looks the renderer can bake into a recording. Each look brings
+ * its own fragment shader and native cadence:
+ *
+ * - [SUPER8]: Kodachrome-style reversal film at the format's 18 fps.
+ * - [VHS]: PAL consumer camcorder at 25 fps (the European VHS standard).
+ */
+enum class AnalogLook(val fps: Int) {
+    SUPER8(18),
+    VHS(25),
+}
+
+/**
+ * OpenGL ES 2.0 stage that bakes an analogue look ([AnalogLook]) into the
+ * recorded video.
  *
  * Data flow:
  *
  *   Camera2 → [inputSurface] → SurfaceTexture (GL_TEXTURE_EXTERNAL_OES)
- *           → fragment shader (procedural LUT + grain + vignette + flicker
- *             + halation + gate-weave + scratches/dust)
+ *           → fragment shader (per-look: Super-8 film grade / VHS signal path)
  *           → encoder EGLSurface (MediaRecorder/MediaCodec hardware H.264)
  *
  * Deliberately the renderer does NOT touch the on-screen preview SurfaceView —
@@ -34,19 +46,20 @@ import java.util.concurrent.TimeUnit
  * path. That keeps the fragile parts (EGL window surfaces, surface hand-off,
  * orientation) confined to the encoder's own persistent input surface, which
  * only exists while recording. The result: opening video mode is as safe as
- * the normal pipeline, and the Super-8 grade is rendered into the saved file.
+ * the normal pipeline, and the analogue grade is rendered into the saved file.
  *
  * Everything GL runs on a dedicated thread, and every callback body is wrapped
  * so a stray throwable can never kill that thread (and with it the process).
  */
-class Super8Renderer private constructor(
+class AnalogLookRenderer private constructor(
+    val look: AnalogLook,
     val videoWidth: Int,
     val videoHeight: Int,
 ) {
     private lateinit var inputSurfaceInternal: Surface
     private lateinit var surfaceTexture: SurfaceTexture
 
-    private val thread = HandlerThread("Super8GL").apply { start() }
+    private val thread = HandlerThread("AnalogLookGL").apply { start() }
     private val handler = Handler(thread.looper)
 
     // EGL state
@@ -76,6 +89,15 @@ class Super8Renderer private constructor(
     private var uSeedLoc = 0
     private var uJitterLoc = 0
     private var uResolutionLoc = 0
+    private var uVidXLoc = 0
+    private var uVidYLoc = 0
+
+    /** Clockwise rotation baked into [encoderMvp]; needed to map video-space
+     *  directions back into texture space for the VHS shader. */
+    private var encoderRotationDeg = 0
+
+    /** Native cadence of the selected look (18 fps Super-8, 25 fps PAL VHS). */
+    private val frameIntervalNs = 1_000_000_000.0 / look.fps
 
     private val stMatrix = FloatArray(16)
     private val quadVertices: FloatBuffer = floatBuffer(
@@ -87,7 +109,7 @@ class Super8Renderer private constructor(
     )
 
     private var frameCount = 0L
-    /** Timestamp (ns) of the last frame we actually rendered, for 18 fps pacing. */
+    /** Timestamp (ns) of the last frame we actually rendered, for fps pacing. */
     private var lastDrawTs = 0L
     @Volatile private var released = false
 
@@ -101,7 +123,13 @@ class Super8Renderer private constructor(
         Matrix.setIdentityM(encoderMvp, 0)
         initEgl()
         makeCurrent(pbufferSurface)
-        program = buildProgram(VERTEX_SHADER, FRAGMENT_SHADER)
+        program = buildProgram(
+            VERTEX_SHADER,
+            when (look) {
+                AnalogLook.SUPER8 -> SUPER8_FRAGMENT_SHADER
+                AnalogLook.VHS -> VHS_FRAGMENT_SHADER
+            },
+        )
         oesTextureId = createOesTexture()
         surfaceTexture = SurfaceTexture(oesTextureId).apply {
             setDefaultBufferSize(videoWidth, videoHeight)
@@ -127,6 +155,7 @@ class Super8Renderer private constructor(
                 // Negative because gl uses CCW-positive rotation while the
                 // orientation contract is clockwise.
                 Matrix.setRotateM(encoderMvp, 0, -rotationDeg.toFloat(), 0f, 0f, 1f)
+                encoderRotationDeg = rotationDeg
                 Log.d(
                     TAG,
                     "startEncoder: requested=${videoWidth}x$videoHeight " +
@@ -236,10 +265,10 @@ class Super8Renderer private constructor(
             // in CLOCK_MONOTONIC. Mixing the two makes the muxer think the
             // tracks are minutes apart → a bogus multi-minute duration and an
             // unplayable file. nanoTime matches the audio clock and keeps A/V
-            // in sync. We also pace to ~18 fps off the same wall clock.
+            // in sync. We also pace to the look's fps off the same wall clock.
             val nowNs = System.nanoTime()
             if (lastDrawTs > 0 &&
-                nowNs - lastDrawTs < (FRAME_INTERVAL_NS * 0.85).toLong()
+                nowNs - lastDrawTs < (frameIntervalNs * 0.85).toLong()
             ) {
                 return
             }
@@ -280,23 +309,56 @@ class Super8Renderer private constructor(
         GLES20.glUniformMatrix4fv(uMvpLoc, 1, false, mvp, 0)
         GLES20.glUniformMatrix4fv(uTexMatrixLoc, 1, false, stMatrix, 0)
 
-        // 18 fps clock drives flicker/grain so the look is paced like real film.
-        val t = frameCount / 18f
+        // The look's native frame clock drives flicker/grain/glitch timing.
+        val t = frameCount / look.fps.toFloat()
         GLES20.glUniform1f(uTimeLoc, t)
         GLES20.glUniform1f(uSeedLoc, (frameCount * 0.6180339887f) % 1000f)
-        // Gate weave: real Super-8 transport drifts slowly (pressure plate)
-        // with small per-frame randomness on top (claw registration), and the
-        // vertical axis moves more than the horizontal. Pure sinusoids read as
-        // artificial, so layer incommensurate sines with seeded noise, plus an
-        // occasional one-frame vertical hop when the claw re-seats.
-        val rnd = java.util.Random(frameCount * 7919L)
-        val driftX = Math.sin(frameCount * 0.23) * 0.6 + Math.sin(frameCount * 0.71) * 0.4
-        val driftY = Math.sin(frameCount * 0.19 + 1.3) * 0.6 + Math.sin(frameCount * 0.53) * 0.4
-        val jx = (driftX * 0.5 + (rnd.nextDouble() - 0.5)).toFloat() * 0.0016f
-        var jy = (driftY * 0.5 + (rnd.nextDouble() - 0.5)).toFloat() * 0.0026f
-        if (rnd.nextDouble() < 0.04) jy += (rnd.nextFloat() - 0.5f) * 0.012f
-        GLES20.glUniform2f(uJitterLoc, jx, jy)
+        when (look) {
+            AnalogLook.SUPER8 -> {
+                // Gate weave: real Super-8 transport drifts slowly (pressure
+                // plate) with small per-frame randomness on top (claw
+                // registration), and the vertical axis moves more than the
+                // horizontal. Pure sinusoids read as artificial, so layer
+                // incommensurate sines with seeded noise, plus an occasional
+                // one-frame vertical hop when the claw re-seats.
+                val rnd = java.util.Random(frameCount * 7919L)
+                val driftX = Math.sin(frameCount * 0.23) * 0.6 + Math.sin(frameCount * 0.71) * 0.4
+                val driftY = Math.sin(frameCount * 0.19 + 1.3) * 0.6 + Math.sin(frameCount * 0.53) * 0.4
+                val jx = (driftX * 0.5 + (rnd.nextDouble() - 0.5)).toFloat() * 0.0016f
+                var jy = (driftY * 0.5 + (rnd.nextDouble() - 0.5)).toFloat() * 0.0026f
+                if (rnd.nextDouble() < 0.04) jy += (rnd.nextFloat() - 0.5f) * 0.012f
+                GLES20.glUniform2f(uJitterLoc, jx, jy)
+            }
+            AnalogLook.VHS -> {
+                // VHS has no gate: geometric instability (per-line time-base
+                // error, head-switch tearing, vertical-hold bounce) lives in
+                // the fragment shader, in video space.
+                GLES20.glUniform2f(uJitterLoc, 0f, 0f)
+            }
+        }
         GLES20.glUniform2f(uResolutionLoc, width.toFloat(), height.toFloat())
+
+        // Texture-space direction vectors for one full video-frame step right
+        // (uVidX) and up (uVidY). The VHS shader displaces its samples along
+        // the *video* axes (scanlines are horizontal in the final file), but
+        // vTexCoord lives in camera-buffer space, which is rotated by the MVP
+        // and remapped by the SurfaceTexture matrix. Derivation: videoUV →
+        // clip (×2−1) → position (inverse MVP = CCW rotation by rotationDeg)
+        // → quad texcoord ((pos+1)/2) → vTexCoord (2x2 block of stMatrix,
+        // column-major).
+        val rad = Math.toRadians(encoderRotationDeg.toDouble())
+        val rc = Math.cos(rad).toFloat()
+        val rs = Math.sin(rad).toFloat()
+        GLES20.glUniform2f(
+            uVidXLoc,
+            stMatrix[0] * rc + stMatrix[4] * rs,
+            stMatrix[1] * rc + stMatrix[5] * rs,
+        )
+        GLES20.glUniform2f(
+            uVidYLoc,
+            stMatrix[0] * -rs + stMatrix[4] * rc,
+            stMatrix[1] * -rs + stMatrix[5] * rc,
+        )
 
         GLES20.glActiveTexture(GLES20.GL_TEXTURE0)
         GLES20.glBindTexture(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, oesTextureId)
@@ -438,6 +500,9 @@ class Super8Renderer private constructor(
         uSeedLoc = GLES20.glGetUniformLocation(prog, "uSeed")
         uJitterLoc = GLES20.glGetUniformLocation(prog, "uJitter")
         uResolutionLoc = GLES20.glGetUniformLocation(prog, "uResolution")
+        // -1 (silently ignored by glUniform*) for looks that don't declare them.
+        uVidXLoc = GLES20.glGetUniformLocation(prog, "uVidX")
+        uVidYLoc = GLES20.glGetUniformLocation(prog, "uVidY")
         return prog
     }
 
@@ -466,11 +531,8 @@ class Super8Renderer private constructor(
     }
 
     companion object {
-        private const val TAG = "Super8Renderer"
+        private const val TAG = "AnalogLookRenderer"
         private const val EGL_RECORDABLE_ANDROID = 0x3142
-
-        /** Target Super-8 cadence: 18 fps → ~55.5 ms between frames. */
-        private const val FRAME_INTERVAL_NS = 1_000_000_000.0 / 18.0
 
         /**
          * Creates a renderer and blocks (briefly, with a timeout) until the GL
@@ -478,8 +540,8 @@ class Super8Renderer private constructor(
          * initialisation fails on this device — callers must fall back to the
          * normal (non-GL) pipeline so video still works.
          */
-        fun createOrNull(videoWidth: Int, videoHeight: Int): Super8Renderer? {
-            val renderer = Super8Renderer(videoWidth, videoHeight)
+        fun createOrNull(look: AnalogLook, videoWidth: Int, videoHeight: Int): AnalogLookRenderer? {
+            val renderer = AnalogLookRenderer(look, videoWidth, videoHeight)
             val latch = CountDownLatch(1)
             var ok = false
             renderer.handler.post {
@@ -487,7 +549,7 @@ class Super8Renderer private constructor(
                     renderer.initOnGlThread()
                     ok = true
                 } catch (t: Throwable) {
-                    Log.e(TAG, "Super8 GL init failed", t)
+                    Log.e(TAG, "$look GL init failed", t)
                 } finally {
                     latch.countDown()
                 }
@@ -547,7 +609,7 @@ class Super8Renderer private constructor(
          * mediump (half-float) ranges on some Mali GPUs; the hash also wraps
          * its domain so the mediump fallback stays artefact-free.
          */
-        private const val FRAGMENT_SHADER = """
+        private const val SUPER8_FRAGMENT_SHADER = """
             #extension GL_OES_EGL_image_external : require
             #ifdef GL_FRAGMENT_PRECISION_HIGH
             precision highp float;
@@ -715,6 +777,178 @@ class Super8Renderer private constructor(
                         col = mix(col, col * 0.2, spec * 0.9);
                     }
                 }
+
+                gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+            }
+        """
+
+        /**
+         * PAL consumer-camcorder VHS, modelled on the actual signal path
+         * rather than "video with noise on top":
+         *
+         *  1. Bandwidth split — VHS records luma FM at ~3 MHz (≈240 lines)
+         *     and chroma "color-under" at ~0.6 MHz (≈40 lines). Luma gets a
+         *     mild horizontal soften plus the camcorder detail circuit's
+         *     overshoot ringing; chroma is a wide LEFT-weighted horizontal
+         *     average, so colour smears and trails to the right of edges —
+         *     the classic VHS colour bleed.
+         *  2. Geometry — per-scanline time-base error (each line lands
+         *     slightly off), head-switching tear shearing the bottom ~15
+         *     lines, a tracking "wrinkle" band that occasionally scrolls
+         *     through the frame, and a rare one-frame vertical-hold bounce.
+         *     All of it operates in VIDEO space via gl_FragCoord + uVidX/uVidY
+         *     (texture-space directions of the video axes), so the artefacts
+         *     stay horizontal in the final file in every device orientation.
+         *  3. Colour — muted chroma, lifted video-style black, murky
+         *     green-blue shadows, slight magenta push in highlights, slow
+         *     AWB wander, FM white-clip compression, and per-line chroma
+         *     gain wiggle (colour-under phase noise → faint rainbow shimmer).
+         *  4. Tape damage — horizontally-streaked snow (strong in darks and
+         *     inside the tracking band), and dropout "pop lines": bright
+         *     (rarely dark) partial-width streaks with ragged tails.
+         */
+        private const val VHS_FRAGMENT_SHADER = """
+            #extension GL_OES_EGL_image_external : require
+            #ifdef GL_FRAGMENT_PRECISION_HIGH
+            precision highp float;
+            #else
+            precision mediump float;
+            #endif
+            varying vec2 vTexCoord;
+            uniform samplerExternalOES sTexture;
+            uniform float uTime;
+            uniform float uSeed;
+            uniform vec2 uResolution;
+            uniform vec2 uVidX;
+            uniform vec2 uVidY;
+
+            float hash(vec2 p) {
+                p = mod(p, 512.0);
+                vec3 p3 = fract(vec3(p.x, p.y, p.x) * 0.1031);
+                p3 += dot(p3, p3.yzx + 33.33);
+                return fract((p3.x + p3.y) * p3.z);
+            }
+
+            float vnoise(vec2 p) {
+                vec2 i = floor(p);
+                vec2 f = fract(p);
+                f = f * f * (3.0 - 2.0 * f);
+                float a = hash(i);
+                float b = hash(i + vec2(1.0, 0.0));
+                float c = hash(i + vec2(0.0, 1.0));
+                float d = hash(i + vec2(1.0, 1.0));
+                return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+            }
+
+            float lum(vec3 c) {
+                return dot(c, vec3(0.299, 0.587, 0.114));
+            }
+
+            vec3 tap(vec2 base, float dx) {
+                return texture2D(sTexture, clamp(base + uVidX * dx, 0.0, 1.0)).rgb;
+            }
+
+            void main() {
+                // Video-space position: gl_FragCoord maps 1:1 onto the encoded
+                // frame, y = 0 at the bottom of the displayed picture.
+                vec2 vuv = gl_FragCoord.xy / uResolution;
+                float line = floor(gl_FragCoord.y);
+
+                // --- Time-base error: each scanline lands a touch off ---
+                float jit = (hash(vec2(line, uSeed)) - 0.5) * 0.002
+                          + sin(vuv.y * 9.0 + uTime * 1.1) * 0.0006;
+
+                // --- Vertical-hold bounce: rare one-frame vertical jump ---
+                float jv = 0.0;
+                if (hash(vec2(uSeed, 77.0)) > 0.985) {
+                    jv = (hash(vec2(uSeed, 78.0)) - 0.5) * 0.012;
+                }
+
+                // --- Head-switching tear: bottom lines shear sideways ---
+                float hsBand = 1.0 - smoothstep(0.0, 0.035, vuv.y);
+                if (hsBand > 0.0) {
+                    jit += hsBand * (0.012
+                        + (hash(vec2(line, uSeed + 9.0)) - 0.5) * 0.05 * hsBand);
+                }
+
+                // --- Tracking wrinkle: a distortion band that occasionally
+                // scrolls down through the picture (per 7 s window) ---
+                float ep = floor(uTime / 7.0);
+                float trk = 0.0;
+                if (hash(vec2(ep, 31.0)) > 0.62) {
+                    float trkY = 1.1 - fract(uTime / 7.0) * 1.3;
+                    float trkW = 0.02 + 0.025 * hash(vec2(ep, 37.0));
+                    trk = 1.0 - smoothstep(0.0, trkW, abs(vuv.y - trkY));
+                    jit += (vnoise(vec2(vuv.y * 160.0, uTime * 11.0)) - 0.5) * 0.10 * trk;
+                }
+
+                vec2 base = vTexCoord + uVidX * jit + uVidY * jv;
+
+                // --- Bandwidth split: luma ~3 MHz, chroma ~0.6 MHz ---
+                float px = 1.0 / uResolution.x;
+                vec3 t3 = tap(base, -5.0 * px);
+                vec3 t2 = tap(base, -2.5 * px);
+                vec3 t1 = tap(base, -1.2 * px);
+                vec3 t0 = tap(base, 0.0);
+                vec3 u1 = tap(base, 1.2 * px);
+                vec3 u2 = tap(base, 2.5 * px);
+                vec3 u3 = tap(base, 5.0 * px);
+
+                float yNarrow = lum(t0) * 0.5 + (lum(t1) + lum(u1)) * 0.25;
+                float yWide = yNarrow * 0.6 + (lum(t2) + lum(u2)) * 0.2;
+                // Camcorder "detail" circuit: unsharp overshoot → edge ringing.
+                float ySharp = yNarrow + (yNarrow - yWide) * 1.1;
+
+                // Left-weighted wide average → colour bleeds to the right.
+                vec3 chroma = t3 * 0.16 + t2 * 0.24 + t1 * 0.22 + t0 * 0.18
+                            + u1 * 0.12 + u2 * 0.06 + u3 * 0.02;
+
+                // Smeared colour carried by the sharpened luma.
+                vec3 col = chroma + (ySharp - lum(chroma));
+
+                // Colour-under phase noise: per-line chroma gain wiggle.
+                float cg = 0.82 + 0.36 * hash(vec2(line, uSeed + 13.0));
+                col = vec3(ySharp) + (col - vec3(ySharp)) * cg;
+
+                // --- VHS colour ---
+                col = clamp(col, 0.0, 1.25);
+                float y = lum(col);
+                col = mix(vec3(y), col, 0.72);
+                col = col * 0.93 + 0.035;
+                col += vec3(0.012, -0.002, 0.009) * smoothstep(0.55, 1.0, y);
+                col += vec3(-0.004, 0.006, 0.011) * (1.0 - smoothstep(0.0, 0.45, y));
+                col.r *= 1.0 + 0.013 * sin(uTime * 0.31);
+                col.b *= 1.0 + 0.013 * sin(uTime * 0.23 + 2.0);
+                // FM white clip: highlights compress, never crisp.
+                col -= max(col - 0.86, 0.0) * 0.45;
+
+                // --- Tape noise: horizontally streaked snow ---
+                float n = hash(vec2(floor(gl_FragCoord.x / 1.5), line) + uSeed);
+                float nAmp = mix(0.055, 0.018, smoothstep(0.0, 0.7, y))
+                           + trk * 0.22 + hsBand * 0.15;
+                col += (n - 0.5) * nAmp;
+                // The tracking band also rips the colour out.
+                col = mix(col, vec3(lum(col)), trk * 0.6);
+
+                // --- Dropout "pop lines": lost FM for part of a line ---
+                float dline = floor(line / 2.0);
+                if (hash(vec2(dline, floor(uSeed * 17.0))) > 0.9985) {
+                    float x0 = hash(vec2(dline, uSeed + 3.3)) * 0.9;
+                    float len = 0.04
+                        + 0.6 * hash(vec2(dline, uSeed + 5.1)) * hash(vec2(dline, uSeed + 6.2));
+                    float inSeg = step(x0, vuv.x) * step(vuv.x, x0 + len);
+                    float tail = 1.0 - smoothstep(x0 + len * 0.4, x0 + len, vuv.x);
+                    float dropI = inSeg * max(tail, 0.35);
+                    if (hash(vec2(dline, uSeed + 8.8)) > 0.15) {
+                        col = mix(col, vec3(0.95), dropI * 0.9);
+                    } else {
+                        col = mix(col, vec3(0.04), dropI * 0.85);
+                    }
+                }
+
+                // --- Interlace hint: every other line a touch darker (kept
+                // subtle so playback scaling can't moiré) ---
+                col *= 1.0 - 0.035 * step(0.5, fract(line * 0.5));
 
                 gl_FragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
             }

@@ -29,6 +29,7 @@
     <!-- Video presets -->
     <string name="preset_normal">Normal</string>
     <string name="preset_super8">Super8</string>
+    <string name="preset_vhs">VHS</string>
     <!-- Super8 film reel countdown. %1$s is the remaining time, e.g. "3:20". -->
     <string name="film_reel_remaining">Remaining film reel: %1$s</string>
 </resources>
