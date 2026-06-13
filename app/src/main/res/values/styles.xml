@@ -35,8 +35,8 @@
     </style>
 
     <style name="AppTextAppearance.LabelLarge" parent="TextAppearance.Material3.LabelLarge">
-        <item name="android:fontFamily">sans-serif</item>
-        <item name="fontFamily">sans-serif</item>
+        <item name="android:fontFamily">sans-serif-medium</item>
+        <item name="fontFamily">sans-serif-medium</item>
     </style>
 
 </resources>

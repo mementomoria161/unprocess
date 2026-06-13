@@ -1,4 +1,4 @@
-![logo-sm](https://github.com/user-attachments/assets/264da8ed-7ac7-48b5-b2da-ddd62eafd668)
+![logo-sm](app/src/main/ic_launcher-playstore.png)
 
 
 unprocess

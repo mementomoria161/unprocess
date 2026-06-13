@@ -177,10 +177,7 @@ class CameraFragment : Fragment() {
     /** GL pipeline used only in SUPER8/VHS video mode; null otherwise. */
     private var analogRenderer: AnalogLookRenderer? = null
 
-    /** "Remaining film reel" countdown state (SUPER8 recording only). */
-    private var reelHandler: Handler? = null
-    private var reelRunnable: Runnable? = null
-    private var reelStartElapsed: Long = 0L
+
 
     private var isSettingsMode = false
     private var isAnimatingSettings = false
@@ -194,7 +191,6 @@ class CameraFragment : Fragment() {
     private var currentVideoFile: File? = null
 
     private var persistentSurface: Surface? = null
-    private var movieBlinkAnimator: android.animation.ValueAnimator? = null
     private var isCameraClosed = true
 
     /** Currently selected film simulation. Cycled via the filter toggle. */
@@ -1032,12 +1028,8 @@ class CameraFragment : Fragment() {
             binding.videoToggle?.iconTint = ColorStateList.valueOf(inactiveColor)
         } else {
             // Video is selected
-            if (isRecordingVideo) {
-                // If recording, movieBlinkAnimator handles its background/icon tint
-            } else {
-                binding.videoToggle?.backgroundTintList = ColorStateList.valueOf(getPrimaryColor())
-                binding.videoToggle?.iconTint = ColorStateList.valueOf(activeColor)
-            }
+            binding.videoToggle?.backgroundTintList = ColorStateList.valueOf(getPrimaryColor())
+            binding.videoToggle?.iconTint = ColorStateList.valueOf(activeColor)
             
             // Camera is unselected
             binding.cameraToggle?.backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
@@ -1463,10 +1455,7 @@ class CameraFragment : Fragment() {
                 }
                 isRecordingVideo = true
 
-                // SUPER8 clips are limited to a 200 s "film reel" with a live countdown.
-                if (isSuper8()) {
-                    startReelCountdown()
-                }
+
                 
                 // Add haptic feedback for record start
                 fragmentCameraBinding.captureButton.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
@@ -1476,52 +1465,7 @@ class CameraFragment : Fragment() {
                     toggleSettingsMode()
                 }
                 
-                // Start pulsing red for videoToggle
-                movieBlinkAnimator?.cancel()
-                val redColor = getErrorColor()
-                val defaultColor = getPrimaryColor()
-                movieBlinkAnimator = android.animation.ValueAnimator.ofFloat(0f, 1f).apply {
-                    duration = 3000
-                    repeatMode = android.animation.ValueAnimator.RESTART
-                    repeatCount = android.animation.ValueAnimator.INFINITE
-                    interpolator = android.view.animation.LinearInterpolator()
-                    addUpdateListener { animator ->
-                        val p = animator.animatedValue as Float
-                        
-                        // Custom curve:
-                        // 0% - 40% (p < 0.4): slowly fade in (quadratic ease-in)
-                        // 40% - 70% (0.4 <= p <= 0.7): hold at 1.0 (strong red)
-                        // 70% - 100% (p > 0.7): slowly fade out (quadratic ease-out)
-                        val intensity = when {
-                            p < 0.4f -> {
-                                val ratio = p / 0.4f
-                                ratio * ratio
-                            }
-                            p <= 0.7f -> 1.0f
-                            else -> {
-                                val ratio = (1.0f - p) / 0.3f
-                                ratio * ratio
-                            }
-                        }
 
-                        val color = android.animation.ArgbEvaluator().evaluate(
-                            intensity,
-                            defaultColor,
-                            redColor
-                        ) as Int
-                        val iconColor = android.animation.ArgbEvaluator().evaluate(
-                            intensity,
-                            getOnPrimaryColor(),
-                            Color.WHITE
-                        ) as Int
-                        
-                        _fragmentCameraBinding?.videoToggle?.let { button ->
-                            button.backgroundTintList = ColorStateList.valueOf(color)
-                            button.iconTint = ColorStateList.valueOf(iconColor)
-                        }
-                    }
-                    start()
-                }
                 
                 updateCaptureButtonForState()
                 fragmentCameraBinding.captureButton.isEnabled = true
@@ -1547,8 +1491,7 @@ class CameraFragment : Fragment() {
                 // Add haptic feedback for record stop
                 _fragmentCameraBinding?.captureButton?.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
 
-                // Stop the film-reel countdown (no-op outside SUPER8).
-                stopReelCountdown()
+
 
                 try {
                     // In SUPER8/VHS detach the encoder from the renderer first
@@ -1629,8 +1572,7 @@ class CameraFragment : Fragment() {
                 Log.e(TAG, "Failed to stop video recording", exc)
             } finally {
                 setProcessing(false)
-                movieBlinkAnimator?.cancel()
-                movieBlinkAnimator = null
+
                 updateCaptureButtonForState()
                 if (_fragmentCameraBinding != null) {
                     reEnableUI()
@@ -1642,45 +1584,7 @@ class CameraFragment : Fragment() {
         }
     }
 
-    /**
-     * Starts the SUPER8 "film reel" countdown. Shows a progress bar that
-     * drains over [SUPER8_MAX_MILLIS] and auto-stops the recording when the
-     * reel runs out, mimicking a fixed-length Super-8 cartridge.
-     */
-    private fun startReelCountdown() {
-        val binding = _fragmentCameraBinding ?: return
-        binding.filmReelBar?.visibility = View.VISIBLE
-        binding.filmReelProgress?.max = 1000
-        binding.filmReelProgress?.progress = 1000
-        reelStartElapsed = android.os.SystemClock.elapsedRealtime()
-        val handler = Handler(android.os.Looper.getMainLooper())
-        reelHandler = handler
-        reelRunnable = object : Runnable {
-            override fun run() {
-                val b = _fragmentCameraBinding ?: return
-                val elapsed = android.os.SystemClock.elapsedRealtime() - reelStartElapsed
-                val remaining = (SUPER8_MAX_MILLIS - elapsed).coerceAtLeast(0L)
-                val frac = remaining.toFloat() / SUPER8_MAX_MILLIS
-                b.filmReelProgress?.progress = (frac * 1000).toInt()
-                val totalSec = (remaining + 999L) / 1000L // round up
-                val mmss = String.format(Locale.US, "%d:%02d", totalSec / 60, totalSec % 60)
-                b.filmReelText?.text = getString(R.string.film_reel_remaining, mmss)
-                if (remaining <= 0L) {
-                    if (isRecordingVideo) stopRecordingVideo()
-                } else {
-                    handler.postDelayed(this, 100L)
-                }
-            }
-        }
-        handler.post(reelRunnable!!)
-    }
 
-    private fun stopReelCountdown() {
-        reelRunnable?.let { reelHandler?.removeCallbacks(it) }
-        reelRunnable = null
-        reelHandler = null
-        _fragmentCameraBinding?.filmReelBar?.visibility = View.GONE
-    }
 
     /** Flips [isProcessing] and refreshes the settings UI (which gates the
      *  filter toggle's isEnabled state on this flag). */
@@ -1706,6 +1610,16 @@ class CameraFragment : Fragment() {
             typedValue.data
         } else {
             Color.parseColor("#E53935")
+        }
+    }
+
+    private fun getOnErrorColor(): Int {
+        val typedValue = android.util.TypedValue()
+        val theme = requireContext().theme
+        return if (theme.resolveAttribute(com.google.android.material.R.attr.colorOnError, typedValue, true)) {
+            typedValue.data
+        } else {
+            Color.WHITE
         }
     }
 
@@ -2006,6 +1920,12 @@ class CameraFragment : Fragment() {
                 Log.w(TAG, "stopPlayback failed: ${exc.message}")
             }
             visibility = View.GONE
+            val lp = layoutParams as? android.widget.FrameLayout.LayoutParams
+            if (lp != null) {
+                lp.width = android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+                lp.height = android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+                layoutParams = lp
+            }
         }
         binding.captureProgressPlayButton?.visibility = View.GONE
 
@@ -2086,6 +2006,7 @@ class CameraFragment : Fragment() {
             // first video frame is actually rendered.
             video.visibility = View.VISIBLE
             video.setOnPreparedListener { mp ->
+                adjustVideoViewSizeForCenterCrop(video, mp)
                 mp.setOnInfoListener { _, what, _ ->
                     if (what == android.media.MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
                         _fragmentCameraBinding?.captureProgressThumbnail?.visibility = View.GONE
@@ -2117,6 +2038,55 @@ class CameraFragment : Fragment() {
         }
     }
 
+    private fun adjustVideoViewSizeForCenterCrop(videoView: android.widget.VideoView, mediaPlayer: android.media.MediaPlayer) {
+        val container = _fragmentCameraBinding?.viewFinderContainer ?: return
+        val containerWidth = container.width
+        val containerHeight = container.height
+        if (containerWidth <= 0 || containerHeight <= 0) return
+
+        var videoWidth = mediaPlayer.videoWidth
+        var videoHeight = mediaPlayer.videoHeight
+        if (videoWidth <= 0 || videoHeight <= 0) return
+
+        // Retrieve rotation to swap width/height if necessary
+        try {
+            val retriever = android.media.MediaMetadataRetriever()
+            val uri = videoUri
+            if (uri != null) {
+                retriever.setDataSource(requireContext(), uri)
+            } else {
+                currentVideoFile?.let { retriever.setDataSource(it.absolutePath) }
+            }
+            val rotationStr = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION)
+            val rotation = rotationStr?.toIntOrNull() ?: 0
+            retriever.release()
+
+            if (rotation == 90 || rotation == 270) {
+                val temp = videoWidth
+                videoWidth = videoHeight
+                videoHeight = temp
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to retrieve video rotation for preview scaling", e)
+        }
+
+        val containerRatio = containerWidth.toFloat() / containerHeight.toFloat()
+        val videoRatio = videoWidth.toFloat() / videoHeight.toFloat()
+
+        val layoutParams = videoView.layoutParams as android.widget.FrameLayout.LayoutParams
+        if (videoRatio > containerRatio) {
+            // Video is wider than container -> match container height, scale width (overflow/crop on sides)
+            layoutParams.height = containerHeight
+            layoutParams.width = (containerHeight * videoRatio).toInt()
+        } else {
+            // Video is taller than container -> match container width, scale height (overflow/crop on top/bottom)
+            layoutParams.width = containerWidth
+            layoutParams.height = (containerWidth / videoRatio).toInt()
+        }
+        layoutParams.gravity = android.view.Gravity.CENTER
+        videoView.layoutParams = layoutParams
+    }
+
     /** Toggles the capture button label between "Capture" and "Take new"
      *  depending on whether the Done overlay is up. The landscape layout
      *  uses an ImageButton without text — view binding types the field as
@@ -2139,6 +2109,10 @@ class CameraFragment : Fragment() {
             button.backgroundTintList = ColorStateList.valueOf(getSecondaryContainerColor())
             button.setTextColor(getOnSecondaryContainerColor())
             button.iconTint = ColorStateList.valueOf(getOnSecondaryContainerColor())
+        } else if (isRecordingVideo) {
+            button.backgroundTintList = ColorStateList.valueOf(getErrorColor())
+            button.setTextColor(getOnErrorColor())
+            button.iconTint = ColorStateList.valueOf(getOnErrorColor())
         } else {
             button.backgroundTintList = ColorStateList.valueOf(getPrimaryColor())
             button.setTextColor(getOnPrimaryColor())
@@ -2147,9 +2121,6 @@ class CameraFragment : Fragment() {
     }
 
     private fun releaseResources() {
-        movieBlinkAnimator?.cancel()
-        movieBlinkAnimator = null
-        stopReelCountdown()
         // Stop feeding the encoder (blocks until the GL thread is done) before
         // tearing down the recorder, in every teardown path.
         analogRenderer?.stopEncoder()
@@ -3334,9 +3305,6 @@ class CameraFragment : Fragment() {
         frozenThumbnail = null
         persistentSurface?.release()
         persistentSurface = null
-        movieBlinkAnimator?.cancel()
-        movieBlinkAnimator = null
-        stopReelCountdown()
         analogRenderer?.release()
         analogRenderer = null
         _fragmentCameraBinding = null
@@ -3355,8 +3323,7 @@ class CameraFragment : Fragment() {
         /** How long the error message stays visible before dismissing the overlay. */
         private const val ERROR_INDICATOR_MILLIS: Long = 1800
 
-        /** SUPER8 "film reel" length — recordings auto-stop after this. */
-        private const val SUPER8_MAX_MILLIS: Long = 200_000L
+
 
         /** Helper data class used to hold capture metadata with their associated image */
         data class CombinedCaptureResult(

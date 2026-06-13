@@ -934,7 +934,7 @@ class AnalogLookRenderer private constructor(
                 // --- Dropout "pop lines": lost FM for part of a line
                 // (~0.075% of line pairs per frame) ---
                 float dline = floor(line / 2.0);
-                if (hash(vec2(dline, floor(uSeed * 17.0))) > 0.99925) {
+                if (hash(vec2(dline, floor(uSeed * 17.0))) > 0.99994) {
                     float x0 = hash(vec2(dline, uSeed + 3.3)) * 0.9;
                     float len = 0.04
                         + 0.6 * hash(vec2(dline, uSeed + 5.1)) * hash(vec2(dline, uSeed + 6.2));
