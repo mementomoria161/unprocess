@@ -7,7 +7,7 @@ unprocess
 
 Based originally on the Google Camera2Basic sample, it has been heavily extended to support film simulations, real-time procedural analog video styles, multiple aspect ratios, and custom file formats.
 
----
+
 
 Features
 --------
@@ -44,7 +44,7 @@ Record high-resolution videos using either a clean standard pipeline or advanced
 * **Media Review Overlay**: View the captured photo or play back the recorded video inside the app immediately after capture. Dismiss the review and resume the camera feed with a single click.
 * **Optimized Frame Layouts**: Fully responsive preview scaling that prevents stretched/distorted viewfinders on device orientation changes or cold startups.
 
----
+
 
 Technical Implementation
 ------------------------
@@ -55,20 +55,11 @@ Technical Implementation
 
 [1]: https://developer.android.com/reference/android/hardware/camera2/package-summary.html
 
----
 
-Getting Started
+
+Prerequisites
 ---------------
 
-### Prerequisites
 * Android SDK 21+ (compiled with SDK 36)
 * Android Studio (Ladybug or newer recommended)
 * Android device running Android 5.0+ with **Camera2 RAW** support (required for photo modes)
-
-
-
-Support & Contributions
------------------------
-
-Patches, bug reports, and features are welcome! Feel free to fork the repository and submit a pull request.
-
