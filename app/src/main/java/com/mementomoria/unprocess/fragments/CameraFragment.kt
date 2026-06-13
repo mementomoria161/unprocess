@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.reilandeubank.unprocess.fragments
+package com.mementomoria.unprocess.fragments
 
 import android.annotation.SuppressLint
 import android.content.Context
@@ -50,16 +50,16 @@ import androidx.fragment.app.Fragment
 import androidx.lifecycle.Observer
 import androidx.lifecycle.lifecycleScope
 import androidx.navigation.fragment.navArgs
-import com.reilandeubank.unprocess.utils.computeExifOrientation
-import com.reilandeubank.unprocess.utils.computeJpegOrientation
-import com.reilandeubank.unprocess.utils.getPreviewOutputSize
-import com.reilandeubank.unprocess.utils.OrientationLiveData
-import com.reilandeubank.unprocess.R
-import com.reilandeubank.unprocess.databinding.FragmentCameraBinding
-import com.reilandeubank.unprocess.filter.FilmFilter
-import com.reilandeubank.unprocess.filter.FilmSimulation
-import com.reilandeubank.unprocess.filter.AnalogLook
-import com.reilandeubank.unprocess.filter.AnalogLookRenderer
+import com.mementomoria.unprocess.utils.computeExifOrientation
+import com.mementomoria.unprocess.utils.computeJpegOrientation
+import com.mementomoria.unprocess.utils.getPreviewOutputSize
+import com.mementomoria.unprocess.utils.OrientationLiveData
+import com.mementomoria.unprocess.R
+import com.mementomoria.unprocess.databinding.FragmentCameraBinding
+import com.mementomoria.unprocess.filter.FilmFilter
+import com.mementomoria.unprocess.filter.FilmSimulation
+import com.mementomoria.unprocess.filter.AnalogLook
+import com.mementomoria.unprocess.filter.AnalogLookRenderer
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch

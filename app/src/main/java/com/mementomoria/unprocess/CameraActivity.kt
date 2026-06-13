@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.reilandeubank.unprocess
+package com.mementomoria.unprocess
 
 import android.graphics.Color
 import android.os.Build
@@ -26,8 +26,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.WindowCompat
 import androidx.navigation.fragment.NavHostFragment
 import com.google.android.material.color.DynamicColors
-import com.reilandeubank.unprocess.databinding.ActivityCameraBinding
-import com.reilandeubank.unprocess.fragments.CameraFragment
+import com.mementomoria.unprocess.databinding.ActivityCameraBinding
+import com.mementomoria.unprocess.fragments.CameraFragment
 
 class CameraActivity : AppCompatActivity() {
 

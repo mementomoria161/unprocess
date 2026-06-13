@@ -1,4 +1,4 @@
-package com.reilandeubank.unprocess.utils
+package com.mementomoria.unprocess.utils
 
 import android.graphics.ImageFormat
 import android.media.Image

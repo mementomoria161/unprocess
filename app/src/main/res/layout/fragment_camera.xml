@@ -43,7 +43,7 @@
         android:layout_marginTop="16dp"
         android:layout_marginBottom="16dp">
 
-        <com.reilandeubank.unprocess.utils.AutoFitSurfaceView
+        <com.mementomoria.unprocess.utils.AutoFitSurfaceView
             android:id="@+id/view_finder"
             android:layout_width="match_parent"
             android:layout_height="match_parent"

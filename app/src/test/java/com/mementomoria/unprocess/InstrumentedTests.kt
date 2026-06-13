@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.reilandeubank.unprocess
+package com.mementomoria.unprocess
 
 import android.Manifest
 import android.content.Context
@@ -43,6 +43,6 @@ class MainInstrumentedTest {
     fun useAppContext() {
         // Context of the app under test
         val context = ApplicationProvider.getApplicationContext() as Context
-        assertEquals("com.reilandeubank.unprocess", context.packageName)
+        assertEquals("com.mementomoria.unprocess", context.packageName)
     }
 }

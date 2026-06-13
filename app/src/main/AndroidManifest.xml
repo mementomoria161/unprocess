@@ -39,7 +39,7 @@
         tools:ignore="GoogleAppIndexingWarning,HardcodedDebugMode">
 
         <activity
-            android:name="com.reilandeubank.unprocess.CameraActivity"
+            android:name="com.mementomoria.unprocess.CameraActivity"
             android:clearTaskOnLaunch="true"
             android:exported="true"
             android:screenOrientation="portrait"

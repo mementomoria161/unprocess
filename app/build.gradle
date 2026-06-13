@@ -33,11 +33,11 @@ def hasReleaseKeystore = keystorePropertiesFile.exists() &&
         keystoreProperties['storeFile'] != null
 
 android {
-    namespace = "com.reilandeubank.unprocess"
+    namespace = "com.mementomoria.unprocess"
     compileSdkVersion 36
     defaultConfig {
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-        applicationId "com.reilandeubank.unprocess"
+        applicationId "com.mementomoria.unprocess"
         minSdkVersion 21
         targetSdkVersion 36
         versionCode 2

@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.reilandeubank.unprocess.fragments
+package com.mementomoria.unprocess.fragments
 
 import android.Manifest
 import android.content.Context
@@ -28,7 +28,7 @@ import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.navigation.Navigation
 import androidx.lifecycle.lifecycleScope
-import com.reilandeubank.unprocess.R
+import com.mementomoria.unprocess.R
 
 private const val PERMISSIONS_REQUEST_CODE = 10
 private val PERMISSIONS_REQUIRED = arrayOf(

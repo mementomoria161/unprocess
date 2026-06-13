@@ -1,4 +1,4 @@
-package com.reilandeubank.unprocess.filter
+package com.mementomoria.unprocess.filter
 
 import android.graphics.SurfaceTexture
 import android.opengl.EGL14

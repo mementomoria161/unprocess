@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package com.reilandeubank.unprocess.utils
+package com.mementomoria.unprocess.utils
 
 import android.graphics.Point
 import android.hardware.camera2.CameraCharacteristics
