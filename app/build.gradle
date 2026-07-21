@@ -18,6 +18,14 @@ apply plugin: 'com.android.application'
 apply plugin: 'kotlin-android'
 apply plugin: "androidx.navigation.safeargs"
 
+// Seconds since 2020-01-01 UTC. A Gradle build always takes longer than one
+// second, so every newly built APK has a monotonically increasing versionCode
+// without someone having to update it by hand.
+def versionCodeEpochMillis = 1_577_836_800_000L
+def automaticVersionCode = Math.toIntExact(
+        Math.floorDiv(System.currentTimeMillis() - versionCodeEpochMillis, 1_000L)
+)
+
 // Optional release signing — looks for a `keystore.properties` file next to
 // this build.gradle. If present, the release build is signed with the user's
 // own keystore; otherwise the release variant is left UNSIGNED so the build
@@ -40,7 +48,7 @@ android {
         applicationId "com.mementomoria.unprocess"
         minSdkVersion 21
         targetSdkVersion 36
-        versionCode 2
+        versionCode automaticVersionCode
         versionName "1.0.1"
     }
 

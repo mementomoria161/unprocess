@@ -76,8 +76,8 @@ data class FilmParams(
 }
 
 /**
- * The user-selectable film simulations. Cycled in this declaration order via
- * the camera-screen filter button. [NORMAL] is the identity (no processing).
+ * The user-selectable film simulations. Their declaration order is also the
+ * order of the camera-screen rotary dial. [NORMAL] is the identity (no processing).
  *
  * The three film looks aim at the characteristic colour signature of their
  * real-world emulsions:

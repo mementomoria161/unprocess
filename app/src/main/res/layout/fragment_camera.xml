@@ -35,7 +35,7 @@
         app:layout_constrainedWidth="true"
         app:layout_constrainedHeight="true"
         app:layout_constraintTop_toBottomOf="@+id/top_controls"
-        app:layout_constraintBottom_toTopOf="@+id/gallery_button"
+        app:layout_constraintBottom_toTopOf="@+id/capture_button"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         android:layout_marginStart="16dp"
@@ -147,58 +147,74 @@
     <com.google.android.material.card.MaterialCardView
         android:id="@+id/lens_selector_card"
         android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        app:cardBackgroundColor="#26FFFFFF"
-        app:cardCornerRadius="32dp"
+        android:layout_height="56dp"
+        app:cardBackgroundColor="@android:color/transparent"
+        app:cardCornerRadius="28dp"
         app:cardElevation="0dp"
-        app:strokeWidth="1dp"
-        app:strokeColor="#26FFFFFF"
+        app:cardPreventCornerOverlap="false"
+        app:cardUseCompatPadding="false"
+        app:contentPadding="0dp"
+        app:strokeWidth="0dp"
+        android:clipChildren="false"
+        android:clipToPadding="false"
+        android:clipToOutline="false"
         android:layout_marginBottom="16dp"
-        android:layout_marginStart="32dp"
-        android:layout_marginEnd="32dp"
         app:layout_constraintBottom_toBottomOf="@+id/view_finder_container"
-        app:layout_constraintStart_toStartOf="@+id/view_finder_container"
-        app:layout_constraintEnd_toEndOf="@+id/view_finder_container"
-        app:layout_constraintWidth_default="wrap">
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent">
 
-        <HorizontalScrollView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_gravity="center_horizontal"
-            android:scrollbars="none"
-            android:overScrollMode="never">
-
-            <LinearLayout
-                android:id="@+id/lens_selector_container"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:padding="4dp"
-                android:gravity="center_vertical" />
-
-        </HorizontalScrollView>
+        <com.mementomoria.unprocess.views.LensSelectorView
+            android:id="@+id/lens_selector"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="center" />
 
     </com.google.android.material.card.MaterialCardView>
 
-    <com.google.android.material.button.MaterialButton
-        android:id="@+id/gallery_button"
-        style="@style/Widget.Material3.Button.TonalButton"
+    <FrameLayout
+        android:id="@+id/film_mode_container"
         android:layout_width="104dp"
         android:layout_height="104dp"
         android:layout_marginBottom="48dp"
         android:layout_marginStart="32dp"
-        app:icon="@drawable/ic_photo"
-        app:iconTint="?attr/colorOnSecondaryContainer"
-        app:backgroundTint="?attr/colorSecondaryContainer"
-        app:cornerRadius="26dp"
-        app:iconSize="30dp"
-        android:padding="0dp"
-        app:iconPadding="0dp"
-        app:iconGravity="textStart"
-        android:insetTop="0dp"
-        android:insetBottom="0dp"
         app:layout_constraintBottom_toBottomOf="parent"
-        app:layout_constraintStart_toStartOf="parent" />
+        app:layout_constraintStart_toStartOf="parent">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/film_mode_toggle"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:contentDescription="@string/film_mode"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:padding="0dp"
+            app:backgroundTint="?attr/colorSecondaryContainer"
+            app:cornerRadius="52dp"
+            app:icon="@drawable/ic_camera_roll"
+            app:iconGravity="textStart"
+            app:iconPadding="0dp"
+            app:iconSize="30dp"
+            app:iconTint="?attr/colorOnSecondaryContainer"
+            android:visibility="gone" />
+
+        <com.mementomoria.unprocess.views.FilmModeDialView
+            android:id="@+id/inline_film_mode_dial"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent" />
+
+    </FrameLayout>
+
+    <com.mementomoria.unprocess.views.CaptureDevelopProgressView
+        android:id="@+id/capture_develop_progress"
+        android:layout_width="0dp"
+        android:layout_height="104dp"
+        android:clickable="false"
+        android:importantForAccessibility="no"
+        android:visibility="gone"
+        app:layout_constraintBottom_toBottomOf="@id/capture_button"
+        app:layout_constraintEnd_toEndOf="@id/capture_button"
+        app:layout_constraintStart_toStartOf="@id/capture_button" />
 
     <com.google.android.material.button.MaterialButton
         android:id="@+id/capture_button"
@@ -206,16 +222,19 @@
         android:layout_height="104dp"
         android:layout_marginEnd="32dp"
         android:layout_marginStart="8dp"
-        android:text="@string/capture"
-        android:textSize="22sp"
+        android:contentDescription="@string/capture"
+        android:gravity="center"
         android:maxLines="1"
-        app:cornerRadius="52dp"
+        android:text=""
         android:insetTop="0dp"
         android:insetBottom="0dp"
-        app:layout_constraintBottom_toBottomOf="@+id/gallery_button"
-        app:layout_constraintTop_toTopOf="@+id/gallery_button"
+        app:cornerRadius="52dp"
+        app:iconGravity="textStart"
+        app:iconPadding="0dp"
+        app:iconSize="28dp"
+        app:layout_constraintBottom_toBottomOf="@+id/film_mode_container"
         app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toEndOf="@+id/gallery_button" />
+        app:layout_constraintStart_toEndOf="@+id/film_mode_container" />
 
     <!-- Dark semi-transparent dim overlay when settings menu is active -->
     <View
@@ -231,11 +250,11 @@
     <LinearLayout
         android:id="@+id/top_controls"
         android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:layout_marginEnd="32dp"
+        android:layout_height="56dp"
         android:layout_marginTop="79dp"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
 
@@ -243,7 +262,6 @@
             android:id="@+id/mode_selection_pill"
             android:layout_width="112dp"
             android:layout_height="56dp"
-            android:layout_marginEnd="8dp"
             app:cardBackgroundColor="?attr/colorSecondaryContainer"
             app:cardCornerRadius="28dp"
             app:cardElevation="0dp"
@@ -270,7 +288,7 @@
                     android:insetRight="0dp"
                     android:minWidth="0dp"
                     android:minHeight="0dp"
-                    app:icon="@drawable/ic_camera"
+                    app:icon="@drawable/ic_photo_camera"
                     app:iconGravity="textStart"
                     app:iconPadding="0dp"
                     app:iconSize="24dp"
@@ -290,7 +308,7 @@
                     android:insetRight="0dp"
                     android:minWidth="0dp"
                     android:minHeight="0dp"
-                    app:icon="@drawable/ic_video"
+                    app:icon="@drawable/ic_videocam"
                     app:iconGravity="textStart"
                     app:iconPadding="0dp"
                     app:iconSize="24dp"
@@ -302,12 +320,40 @@
 
         </com.google.android.material.card.MaterialCardView>
 
+        <Space
+            android:layout_width="8dp"
+            android:layout_height="1dp"
+            />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/gallery_button"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="56dp"
+            android:layout_height="56dp"
+            android:padding="12dp"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:contentDescription="@string/gallery"
+            app:icon="@drawable/ic_gallery"
+            app:iconGravity="textStart"
+            app:iconPadding="0dp"
+            app:iconSize="24dp"
+            app:shapeAppearanceOverlay="@style/ShapeAppearance.Material3.Corner.Full" />
+
+        <Space
+            android:layout_width="8dp"
+            android:layout_height="1dp"
+            />
+
         <com.google.android.material.button.MaterialButton
             android:id="@+id/flash_toggle"
             style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="56dp"
             android:layout_height="56dp"
-            android:layout_marginEnd="8dp"
             android:padding="12dp"
             android:insetTop="0dp"
             android:insetBottom="0dp"
@@ -319,6 +365,11 @@
             app:iconPadding="0dp"
             app:iconSize="24dp"
             app:shapeAppearanceOverlay="@style/ShapeAppearance.Material3.Corner.Full" />
+
+        <Space
+            android:layout_width="8dp"
+            android:layout_height="1dp"
+            />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/settings_toggle"
@@ -332,7 +383,7 @@
             android:insetRight="0dp"
             android:minWidth="0dp"
             android:minHeight="0dp"
-            app:icon="@drawable/ic_settings"
+            app:icon="@drawable/ic_settings_new"
             app:iconGravity="textStart"
             app:iconPadding="0dp"
             app:iconSize="24dp"
@@ -355,53 +406,6 @@
         android:layout_marginTop="16dp">
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/filter_toggle"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="wrap_content"
-            android:layout_height="56dp"
-            android:layout_marginBottom="8dp"
-            android:layout_gravity="end"
-            android:text="@string/filter_normal"
-            android:textSize="16sp"
-            android:maxLines="1"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:paddingStart="64dp"
-            android:paddingEnd="64dp"
-            app:icon="@drawable/ic_film_mode"
-            app:iconPadding="8dp"
-            app:iconSize="24dp"
-            app:iconGravity="start" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/preset_toggle"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="wrap_content"
-            android:layout_height="56dp"
-            android:layout_marginBottom="8dp"
-            android:layout_gravity="end"
-            android:text="@string/preset_normal"
-            android:textSize="16sp"
-            android:maxLines="1"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:visibility="gone"
-            android:paddingStart="64dp"
-            android:paddingEnd="64dp"
-            app:icon="@drawable/ic_film_mode"
-            app:iconPadding="8dp"
-            app:iconSize="24dp"
-            app:iconGravity="start" />
-
-        <com.google.android.material.button.MaterialButton
             android:id="@+id/aspect_ratio_toggle"
             style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="wrap_content"
@@ -419,7 +423,7 @@
             android:minHeight="0dp"
             android:paddingStart="64dp"
             android:paddingEnd="64dp"
-            app:icon="@drawable/ic_aspect_ratio"
+            app:icon="@drawable/ic_aspect_ratio_new"
             app:iconPadding="8dp"
             app:iconSize="24dp"
             app:iconGravity="start" />
@@ -443,7 +447,7 @@
             android:visibility="gone"
             android:paddingStart="64dp"
             android:paddingEnd="64dp"
-            app:icon="@drawable/ic_resolution"
+            app:icon="@drawable/ic_mp"
             app:iconPadding="8dp"
             app:iconSize="24dp"
             app:iconGravity="start" />
@@ -467,7 +471,7 @@
             android:visibility="gone"
             android:paddingStart="64dp"
             android:paddingEnd="64dp"
-            app:icon="@drawable/ic_frame_rate"
+            app:icon="@drawable/ic_art_track"
             app:iconPadding="8dp"
             app:iconSize="24dp"
             app:iconGravity="start" />
@@ -489,7 +493,7 @@
             android:minHeight="0dp"
             android:paddingStart="64dp"
             android:paddingEnd="64dp"
-            app:icon="@drawable/ic_file_format"
+            app:icon="@drawable/ic_save"
             app:iconPadding="8dp"
             app:iconSize="24dp"
             app:iconGravity="start" />

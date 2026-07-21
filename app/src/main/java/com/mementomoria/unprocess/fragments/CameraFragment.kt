@@ -17,6 +17,7 @@
 package com.mementomoria.unprocess.fragments
 
 import android.annotation.SuppressLint
+import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Color
 import android.graphics.ImageFormat
@@ -60,6 +61,7 @@ import com.mementomoria.unprocess.filter.FilmFilter
 import com.mementomoria.unprocess.filter.FilmSimulation
 import com.mementomoria.unprocess.filter.AnalogLook
 import com.mementomoria.unprocess.filter.AnalogLookRenderer
+import com.mementomoria.unprocess.views.FilmModeDialView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -82,8 +84,6 @@ import android.graphics.BitmapFactory
 import android.os.Environment
 import android.provider.MediaStore
 import androidx.core.content.ContextCompat
-import androidx.core.graphics.toColorInt
-import android.widget.LinearLayout
 import java.io.FileInputStream
 
 class CameraFragment : Fragment() {
@@ -182,6 +182,11 @@ class CameraFragment : Fragment() {
     private var isSettingsMode = false
     private var isAnimatingSettings = false
     private var isCameraInitializing = false
+    private var isFilmModeDialExpanded = false
+    private var filmModeDialAnimator: ValueAnimator? = null
+    private var developProgressAnimator: ValueAnimator? = null
+    private var displayedDevelopProgress = 0
+    private var isDevelopProgressVisible = false
 
     private var isVideoMode: Boolean = false
     private var isRecordingVideo: Boolean = false
@@ -193,7 +198,7 @@ class CameraFragment : Fragment() {
     private var persistentSurface: Surface? = null
     private var isCameraClosed = true
 
-    /** Currently selected film simulation. Cycled via the filter toggle. */
+    /** Currently selected photo film simulation. Chosen with the rotary dial. */
     private var filmSimulation: FilmSimulation = FilmSimulation.NORMAL
     private var savedPhotoFilmSimulation: FilmSimulation = FilmSimulation.NORMAL
 
@@ -451,44 +456,17 @@ class CameraFragment : Fragment() {
             }
         }
 
-        fragmentCameraBinding.filterToggle?.setOnClickListener {
-            if (isVideoMode) return@setOnClickListener
-            filmSimulation = filmSimulation.next()
-            savedPhotoFilmSimulation = filmSimulation
-            updateFilterUI()
-            updateSettingsUI()
-            saveSettings()
-        }
-
-        fragmentCameraBinding.presetToggle?.setOnClickListener {
-            if (isRecordingVideo || isProcessing || !isVideoMode) return@setOnClickListener
-            videoPreset = when (videoPreset) {
-                VideoPreset.NORMAL -> VideoPreset.SUPER8
-                VideoPreset.SUPER8 -> VideoPreset.VHS
-                VideoPreset.VHS -> VideoPreset.NORMAL
-            }
-            // The analogue presets force their cadence + a capped, encoder-safe
-            // resolution; leaving them restores a sensible frame-rate default.
-            when (videoPreset) {
-                VideoPreset.SUPER8 -> coerceSuper8VideoSettings()
-                VideoPreset.VHS -> coerceVhsVideoSettings()
-                VideoPreset.NORMAL -> if (videoFrameRate == 18 || videoFrameRate == 25) {
-                    videoFrameRate = if (30 in getSupportedVideoFramerates()) 30 else getSupportedVideoFramerates().firstOrNull() ?: 30
-                }
-            }
-            updateSettingsUI()
-            saveSettings()
-            // The pipeline differs between presets — rebuild the session.
-            if (!isShowingDone) {
-                initializeCamera()
-            }
+        installFilmDialDismissOnButtons(fragmentCameraBinding.root)
+        fragmentCameraBinding.inlineFilmModeDial?.apply {
+            onCollapsedClick = { toggleInlineFilmModeDial() }
+            onCenterClick = { setInlineFilmModeDialExpanded(false) }
         }
 
         val navOffsetListener = androidx.core.view.OnApplyWindowInsetsListener { v, insets ->
             val systemBars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
             val lp = v.layoutParams as? ViewGroup.MarginLayoutParams
             if (lp != null) {
-                if (v.id == R.id.gallery_button) {
+                if (v.id == R.id.film_mode_container) {
                     lp.bottomMargin = 48.dpToPx() + systemBars.bottom
                     v.layoutParams = lp
                 } else if (v.id == R.id.capture_button) {
@@ -499,7 +477,7 @@ class CameraFragment : Fragment() {
             androidx.core.view.WindowInsetsCompat.CONSUMED
         }
         androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(fragmentCameraBinding.captureButton, navOffsetListener)
-        fragmentCameraBinding.galleryButton?.let {
+        fragmentCameraBinding.filmModeContainer?.let {
             androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(it, navOffsetListener)
         }
 
@@ -575,9 +553,9 @@ class CameraFragment : Fragment() {
 
     private fun updateFlashUI() {
         val iconRes = if (flashMode == CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH) {
-            R.drawable.ic_flash_on
+            R.drawable.ic_flash_on_new
         } else {
-            R.drawable.ic_flash_off
+            R.drawable.ic_flash_off_new
         }
         fragmentCameraBinding.flashToggle?.text = ""
         fragmentCameraBinding.flashToggle?.setIconResource(iconRes)
@@ -602,8 +580,7 @@ class CameraFragment : Fragment() {
     )
 
     private fun setupLensSelector() {
-        val container = fragmentCameraBinding.lensSelectorContainer
-        container?.removeAllViews()
+        val selector = fragmentCameraBinding.lensSelector
 
         val cameraIdList = cameraManager.cameraIdList
         Log.d(TAG, "Lens selector — cameras found: ${cameraIdList.joinToString()}")
@@ -713,34 +690,6 @@ class CameraFragment : Fragment() {
         }
         fragmentCameraBinding.lensSelectorCard?.visibility = View.VISIBLE
 
-        entries.forEach { entry ->
-            val button = com.google.android.material.button.MaterialButton(
-                requireContext(),
-                null,
-                com.google.android.material.R.attr.materialButtonOutlinedStyle,
-            ).apply {
-                text = entry.label
-                maxLines = 1
-                layoutParams = LinearLayout.LayoutParams(44.dpToPx(), 44.dpToPx()).apply {
-                    setMargins(4.dpToPx(), 4.dpToPx(), 4.dpToPx(), 4.dpToPx())
-                }
-                setPadding(0, 0, 0, 0)
-                insetTop = 0
-                insetBottom = 0
-                minWidth = 0
-                minHeight = 0
-                cornerRadius = 22.dpToPx()
-                strokeWidth = 0
-                setOnClickListener {
-                    if (currentCameraId != entry.id) {
-                        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-                        switchCamera(entry.id)
-                    }
-                }
-            }
-            container?.addView(button)
-        }
-
         // Resolve logical camera ID to the matching physical camera ID on startup
         val matchingEntries = entries.filter { it.id == currentCameraId || physicalToLogicalMap[it.id] == currentCameraId }
         val resolvedEntry = if (matchingEntries.isNotEmpty()) {
@@ -752,6 +701,15 @@ class CameraFragment : Fragment() {
             currentCameraId = resolvedEntry.id
         }
 
+        selector?.setLenses(
+            labels = entries.map { it.label },
+            selected = allCameraIds.indexOf(currentCameraId).coerceAtLeast(0),
+        )
+        selector?.onLensSelected = { index ->
+            allCameraIds.getOrNull(index)?.let { cameraId ->
+                if (cameraId != currentCameraId) switchCamera(cameraId)
+            }
+        }
         updateLensHighlight()
     }
 
@@ -767,6 +725,7 @@ class CameraFragment : Fragment() {
 
     fun triggerCapture() {
         if (isShowingDone) return
+        setInlineFilmModeDialExpanded(false)
         val button = _fragmentCameraBinding?.captureButton ?: return
         if (button.isEnabled) {
             button.performClick()
@@ -785,8 +744,6 @@ class CameraFragment : Fragment() {
         val overlay = binding.settingsDimOverlay ?: return
         
         val toggles = listOfNotNull(
-            binding.filterToggle,
-            binding.presetToggle,
             binding.aspectRatioToggle,
             binding.resolutionToggle,
             binding.framerateToggle,
@@ -890,34 +847,32 @@ class CameraFragment : Fragment() {
         val binding = _fragmentCameraBinding ?: return
         
         // Always show the standard settings gear icon
-        binding.settingsToggle?.setIconResource(R.drawable.ic_settings)
+        binding.settingsToggle?.setIconResource(R.drawable.ic_settings_new)
         
-        // Settings gear button is highlighted (active) when settings mode is OFF (inactive),
-        // and grayed out (inactive) when settings mode is ON (active).
+        // The gear is quiet while closed and highlighted while its menu is open.
         // Disabled during processing, video recording, and while the review
         // overlay is up (changing session-affecting settings there would
         // desync them from the still-configured camera session).
         val settingsAvailable = !isProcessing && !isRecordingVideo && !isShowingDone
         binding.settingsToggle?.isEnabled = settingsAvailable
-        binding.settingsToggle?.let { setButtonActiveStyle(it, !isSettingsMode && settingsAvailable) }
+        binding.settingsToggle?.let { setButtonActiveStyle(it, isSettingsMode && settingsAvailable) }
         
-        // Flash toggle is always visible and always active
+        // Flash is always tappable, but only highlighted while it is on.
         binding.flashToggle?.visibility = View.VISIBLE
-        setButtonActiveStyle(binding.flashToggle, true)
+        setButtonActiveStyle(
+            binding.flashToggle,
+            flashMode == CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH,
+        )
 
         // Update selector visibilities based on Video Mode
         if (isVideoMode) {
             binding.modeToggle?.visibility = View.GONE
             binding.resolutionToggle?.visibility = View.VISIBLE
             binding.framerateToggle?.visibility = View.VISIBLE
-            binding.presetToggle?.visibility = View.VISIBLE
-            binding.filterToggle?.visibility = View.GONE
         } else {
             binding.modeToggle?.visibility = View.VISIBLE
             binding.resolutionToggle?.visibility = View.GONE
             binding.framerateToggle?.visibility = View.GONE
-            binding.presetToggle?.visibility = View.GONE
-            binding.filterToggle?.visibility = View.VISIBLE
         }
         
         if (!isAnimatingSettings) {
@@ -929,9 +884,7 @@ class CameraFragment : Fragment() {
                     binding.aspectRatioToggle,
                     binding.resolutionToggle,
                     binding.framerateToggle,
-                    binding.presetToggle,
-                    binding.modeToggle,
-                    binding.filterToggle
+                    binding.modeToggle
                 ).forEach { button ->
                     button.alpha = 1f
                     button.scaleX = 1f
@@ -959,30 +912,20 @@ class CameraFragment : Fragment() {
         binding.framerateToggle?.isEnabled = normalVideoSettings
         setButtonActiveStyle(binding.framerateToggle, normalVideoSettings)
 
-        binding.presetToggle?.isEnabled = videoSettingsAvailable
-        setButtonActiveStyle(binding.presetToggle, videoSettingsAvailable)
-        val presetText = when (videoPreset) {
-            VideoPreset.NORMAL -> getString(R.string.preset_normal)
-            VideoPreset.SUPER8 -> getString(R.string.preset_super8)
-            VideoPreset.VHS -> getString(R.string.preset_vhs)
+        // Photo looks are applied on the RAW→Bitmap→JPEG/WEBP conversion
+        // path, so DNG intentionally has no selectable simulation. Video
+        // exposes its analogue presets instead. Keep the top-level dial
+        // unavailable while a capture or review is in progress.
+        val filmModeAvailable = !isProcessing && !isRecordingVideo && !isShowingDone &&
+            (isVideoMode || outputFormat == OutputFormat.JPEG || outputFormat == OutputFormat.WEBP)
+        binding.filmModeToggle?.isEnabled = filmModeAvailable
+        val filmModeIsActive = if (isVideoMode) {
+            videoPreset != VideoPreset.NORMAL
+        } else {
+            filmSimulation != FilmSimulation.NORMAL
         }
-        binding.presetToggle?.text = "Film Mode $presetText"
-
-        // The filter only takes effect on the RAW→Bitmap→JPEG conversion
-        // path. In pure RAW (DNG) mode the saved file is just the sensor
-        // mosaic + metadata, which can't carry these Lightroom-style
-        // adjustments — so the filter button is greyed out there to make
-        // its non-effect visually obvious.
-        //
-        // Also disabled during the save flow: the selected filter is
-        // captured at shutter press and used through the whole pipeline,
-        // letting the user change it mid-flight would be confusing (was
-        // the saved image processed with the old or the new filter?).
-        //
-        // Also disabled during video recording.
-        val filterAvailable = !isProcessing && !isRecordingVideo && !isShowingDone && !isVideoMode && (outputFormat == OutputFormat.JPEG || outputFormat == OutputFormat.WEBP)
-        setButtonActiveStyle(binding.filterToggle, filterAvailable)
-        binding.filterToggle?.isEnabled = filterAvailable
+        setButtonActiveStyle(binding.filmModeToggle, filmModeAvailable && filmModeIsActive)
+        binding.inlineFilmModeDial?.setActive(filmModeIsActive)
 
         // Update resolution toggle text
         val resText = when (videoResolution) {
@@ -1000,12 +943,6 @@ class CameraFragment : Fragment() {
         updateFlashUI()
         updateMovieToggleUI()
         updateModeToggleUI()
-        updateFilterUI()
-    }
-
-    private fun updateFilterUI() {
-        val cleanName = filmSimulation.displayName.replace("Film ", "")
-        fragmentCameraBinding.filterToggle?.text = "Film Mode $cleanName"
     }
 
     private fun updateMovieToggleUI() {
@@ -1034,6 +971,165 @@ class CameraFragment : Fragment() {
             // Camera is unselected
             binding.cameraToggle?.backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
             binding.cameraToggle?.iconTint = ColorStateList.valueOf(inactiveColor)
+        }
+    }
+
+    /** Opens the lower capture control into its in-layout, rotary film selector. */
+    private fun toggleInlineFilmModeDial() {
+        val binding = _fragmentCameraBinding ?: return
+        if (binding.filmModeToggle?.isEnabled != true) return
+        setInlineFilmModeDialExpanded(!isFilmModeDialExpanded)
+    }
+
+    /** Buttons close the dial, but ordinary touches outside it do not. */
+    private fun installFilmDialDismissOnButtons(view: View) {
+        if (view is com.google.android.material.button.MaterialButton) {
+            view.setOnTouchListener { _, event ->
+                if (event.actionMasked == android.view.MotionEvent.ACTION_DOWN) {
+                    setInlineFilmModeDialExpanded(false)
+                }
+                false
+            }
+        }
+        if (view is ViewGroup) {
+            for (index in 0 until view.childCount) {
+                installFilmDialDismissOnButtons(view.getChildAt(index))
+            }
+        }
+    }
+
+    private fun setInlineFilmModeDialExpanded(expanded: Boolean, animate: Boolean = true) {
+        val binding = _fragmentCameraBinding ?: return
+        if (expanded && binding.filmModeToggle?.isEnabled != true) return
+        if (isFilmModeDialExpanded == expanded) return
+
+        val container = binding.filmModeContainer ?: return
+        val dial = binding.inlineFilmModeDial ?: return
+        val captureButton = binding.captureButton
+        val containerParams = container.layoutParams as? androidx.constraintlayout.widget.ConstraintLayout.LayoutParams ?: return
+        val captureParams = captureButton.layoutParams as? androidx.constraintlayout.widget.ConstraintLayout.LayoutParams ?: return
+
+        if (expanded) {
+            configureInlineFilmModeDial(dial)
+        }
+
+        isFilmModeDialExpanded = expanded
+        filmModeDialAnimator?.cancel()
+
+        val collapsedSize = 104.dpToPx()
+        val compactCaptureWidth = 104.dpToPx()
+        val availableBottomWidth = binding.root.width - containerParams.leftMargin -
+            captureParams.leftMargin - captureParams.rightMargin
+        val expandedDialSize = (availableBottomWidth - compactCaptureWidth)
+            .coerceAtLeast(collapsedSize)
+        val targetDialSize = if (expanded) expandedDialSize else collapsedSize
+        val targetCaptureWidth = if (expanded) compactCaptureWidth else {
+            availableBottomWidth - collapsedSize
+        }
+        val startDialWidth = container.width.takeIf { it > 0 } ?: collapsedSize
+        val startDialHeight = container.height.takeIf { it > 0 } ?: collapsedSize
+        val startCaptureWidth = captureButton.width.takeIf { it > 0 } ?: targetCaptureWidth
+
+        fun applyLayout(fraction: Float) {
+            val dialWidth = (startDialWidth + (targetDialSize - startDialWidth) * fraction).toInt()
+            val dialHeight = (startDialHeight + (targetDialSize - startDialHeight) * fraction).toInt()
+            val captureWidth = (startCaptureWidth + (targetCaptureWidth - startCaptureWidth) * fraction).toInt()
+            containerParams.width = dialWidth
+            containerParams.height = dialHeight
+            captureParams.width = captureWidth
+            captureParams.horizontalBias = 1f
+            container.layoutParams = containerParams
+            captureButton.layoutParams = captureParams
+            dial.setExpansionProgress(if (expanded) fraction else 1f - fraction)
+        }
+
+        fun completeLayout() {
+            if (!expanded) {
+                captureParams.width = 0
+                captureParams.horizontalBias = 0.5f
+                captureButton.layoutParams = captureParams
+            }
+        }
+
+        if (!animate) {
+            applyLayout(1f)
+            completeLayout()
+            return
+        }
+
+        filmModeDialAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            var wasCancelled = false
+            duration = 260L
+            interpolator = android.view.animation.DecelerateInterpolator()
+            addUpdateListener { animator ->
+                applyLayout(animator.animatedValue as Float)
+            }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationCancel(animation: android.animation.Animator) {
+                    wasCancelled = true
+                }
+
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    if (!wasCancelled) completeLayout()
+                }
+            })
+            start()
+        }
+    }
+
+    /** Configures the same rotary selector for the currently active capture mode. */
+    private fun configureInlineFilmModeDial(dial: FilmModeDialView) {
+        val names: List<String>
+        val selectedIndex: Int
+        if (isVideoMode) {
+            names = VideoPreset.entries.map { preset ->
+                when (preset) {
+                    VideoPreset.NORMAL -> getString(R.string.preset_normal)
+                    VideoPreset.SUPER8 -> getString(R.string.preset_super8)
+                    VideoPreset.VHS -> getString(R.string.preset_vhs)
+                }
+            }
+            selectedIndex = videoPreset.ordinal
+        } else {
+            names = FilmSimulation.entries.map { it.displayName.removePrefix("Film ") }
+            selectedIndex = filmSimulation.ordinal
+        }
+
+        dial.setModes(names, selectedIndex)
+        dial.onModeSelected = { index ->
+            if (isVideoMode) {
+                setVideoPreset(VideoPreset.entries[index])
+            } else {
+                setFilmSimulation(FilmSimulation.entries[index])
+            }
+        }
+    }
+
+    private fun setFilmSimulation(simulation: FilmSimulation) {
+        if (filmSimulation == simulation) return
+        filmSimulation = simulation
+        savedPhotoFilmSimulation = simulation
+        updateSettingsUI()
+        saveSettings()
+    }
+
+    private fun setVideoPreset(preset: VideoPreset) {
+        if (videoPreset == preset) return
+        videoPreset = preset
+        // The analogue presets force their cadence + a capped, encoder-safe
+        // resolution; leaving them restores a sensible frame-rate default.
+        when (videoPreset) {
+            VideoPreset.SUPER8 -> coerceSuper8VideoSettings()
+            VideoPreset.VHS -> coerceVhsVideoSettings()
+            VideoPreset.NORMAL -> if (videoFrameRate == 18 || videoFrameRate == 25) {
+                videoFrameRate = if (30 in getSupportedVideoFramerates()) 30 else getSupportedVideoFramerates().firstOrNull() ?: 30
+            }
+        }
+        updateSettingsUI()
+        saveSettings()
+        // The pipeline differs between presets — rebuild the session.
+        if (!isShowingDone) {
+            initializeCamera()
         }
     }
 
@@ -1484,6 +1580,7 @@ class CameraFragment : Fragment() {
         if (!isRecordingVideo) return
         
         viewLifecycleOwner.lifecycleScope.launch {
+            var developmentCompleted = false
             try {
                 _fragmentCameraBinding?.captureButton?.isEnabled = false
                 setProcessing(true)
@@ -1520,6 +1617,7 @@ class CameraFragment : Fragment() {
                 mediaRecorder?.reset()
                 mediaRecorder?.release()
                 mediaRecorder = null
+                updateDevelopProgress(35)
                 
                 videoFileDescriptor?.close()
                 videoFileDescriptor = null
@@ -1560,18 +1658,17 @@ class CameraFragment : Fragment() {
                         Log.e(TAG, "Failed to create video thumbnail", e)
                         null
                     }
+                    updateDevelopProgress(85)
                 }
-                
-                // Add a small delay so the user clearly sees the "Developing..." state feedback
-                kotlinx.coroutines.delay(1000)
 
                 if (thumbnail != null) {
                     showProgress(CaptureProgress.Done(thumbnail))
+                    developmentCompleted = true
                 }
             } catch (exc: Exception) {
                 Log.e(TAG, "Failed to stop video recording", exc)
             } finally {
-                setProcessing(false)
+                setProcessing(false, completed = developmentCompleted)
 
                 updateCaptureButtonForState()
                 if (_fragmentCameraBinding != null) {
@@ -1586,11 +1683,82 @@ class CameraFragment : Fragment() {
 
 
 
-    /** Flips [isProcessing] and refreshes the settings UI (which gates the
-     *  filter toggle's isEnabled state on this flag). */
-    private fun setProcessing(value: Boolean) {
+    /** Flips [isProcessing] and refreshes controls gated during image saving. */
+    private fun setProcessing(value: Boolean, completed: Boolean = false) {
         isProcessing = value
+        val progress = _fragmentCameraBinding?.captureDevelopProgress
+        if (value) {
+            developProgressAnimator?.cancel()
+            displayedDevelopProgress = 0
+            isDevelopProgressVisible = true
+            progress?.apply {
+                setColors(getSecondaryContainerColor(), getPrimaryColor())
+                setProgress(0)
+                visibility = View.VISIBLE
+            }
+        } else if (completed) {
+            updateDevelopProgress(100)
+            val hideDelay = (developProgressAnimator?.duration ?: 0L) + 180L
+            progress?.postDelayed({
+                if (!isProcessing) {
+                    developProgressAnimator?.cancel()
+                    displayedDevelopProgress = 0
+                    isDevelopProgressVisible = false
+                    progress?.visibility = View.GONE
+                    progress?.setProgress(0)
+                    updateCaptureButtonForState()
+                }
+            }, hideDelay)
+        } else {
+            developProgressAnimator?.cancel()
+            displayedDevelopProgress = 0
+            isDevelopProgressVisible = false
+            progress?.visibility = View.GONE
+            progress?.setProgress(0)
+        }
+        updateCaptureButtonForState()
         updateSettingsUI()
+    }
+
+    /**
+     * Animates between real processing milestones. The actual work still
+     * controls the targets; interpolation keeps the indicator from jumping
+     * abruptly when a stage completes.
+     */
+    private fun updateDevelopProgress(value: Int) {
+        val progress = _fragmentCameraBinding?.captureDevelopProgress ?: return
+        val target = value.coerceIn(displayedDevelopProgress, 100)
+        if (target == displayedDevelopProgress) return
+
+        isDevelopProgressVisible = true
+        progress.visibility = View.VISIBLE
+        developProgressAnimator?.cancel()
+        val start = displayedDevelopProgress
+        val duration = ((target - start) * 30L).coerceIn(180L, 720L)
+        developProgressAnimator = ValueAnimator.ofInt(start, target).apply {
+            this.duration = duration
+            interpolator = android.view.animation.LinearInterpolator()
+            addUpdateListener { animator ->
+                displayedDevelopProgress = animator.animatedValue as Int
+                progress.setProgress(displayedDevelopProgress)
+                updateDevelopingIconTint()
+            }
+            start()
+        }
+    }
+
+    /** Keeps the icon legible against the colour currently beneath its centre. */
+    private fun updateDevelopingIconTint() {
+        if (!isDevelopProgressVisible) return
+        val button = _fragmentCameraBinding?.captureButton
+                as? com.google.android.material.button.MaterialButton ?: return
+        val iconColor = if (displayedDevelopProgress >= 50) {
+            getOnPrimaryColor()
+        } else {
+            getOnSecondaryContainerColor()
+        }
+        button.setTextColor(iconColor)
+        button.iconTint = ColorStateList.valueOf(iconColor)
     }
 
     private fun getPrimaryColor(): Int {
@@ -2087,28 +2255,36 @@ class CameraFragment : Fragment() {
         videoView.layoutParams = layoutParams
     }
 
-    /** Toggles the capture button label between "Capture" and "Take new"
-     *  depending on whether the Done overlay is up. The landscape layout
-     *  uses an ImageButton without text — view binding types the field as
-     *  the common ancestor View, so we cast and skip the text update if we
-     *  happen to be in landscape. */
+    /**
+     * Updates the capture pill's icon and accessibility label for its current
+     * state. The landscape layout uses an ImageButton, so skip it there.
+     */
     private fun updateCaptureButtonForState() {
         val button = _fragmentCameraBinding?.captureButton
                 as? com.google.android.material.button.MaterialButton ?: return
-        button.text = getString(
-            when {
-                isShowingDone -> R.string.progress_take_new
-                isProcessing -> R.string.progress_developing
-                isRecordingVideo -> R.string.video_stop
-                isVideoMode -> R.string.video_record
-                else -> R.string.capture
-            }
-        )
+        val label = when {
+            isShowingDone -> R.string.progress_take_new
+            isProcessing -> R.string.progress_developing
+            isRecordingVideo -> R.string.video_stop
+            isVideoMode -> R.string.video_record
+            else -> R.string.capture
+        }
+        val icon = when {
+            isShowingDone -> R.drawable.ic_close
+            isProcessing -> R.drawable.ic_labs
+            isRecordingVideo -> R.drawable.ic_stop_circle
+            isVideoMode -> R.drawable.ic_videocam
+            else -> R.drawable.ic_photo_camera
+        }
+        button.text = ""
+        button.contentDescription = getString(label)
+        button.setIconResource(icon)
         
-        if (isProcessing) {
-            button.backgroundTintList = ColorStateList.valueOf(getSecondaryContainerColor())
-            button.setTextColor(getOnSecondaryContainerColor())
-            button.iconTint = ColorStateList.valueOf(getOnSecondaryContainerColor())
+        if (isDevelopProgressVisible) {
+            // The custom Developing background supplies a seamless single
+            // pill, while this MaterialButton keeps its click target/icon.
+            button.backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
+            updateDevelopingIconTint()
         } else if (isRecordingVideo) {
             button.backgroundTintList = ColorStateList.valueOf(getErrorColor())
             button.setTextColor(getOnErrorColor())
@@ -2207,27 +2383,12 @@ class CameraFragment : Fragment() {
         Log.d(TAG, "reEnableUI() called, setting isCameraInitializing to false")
         isCameraInitializing = false
         fragmentCameraBinding.captureButton.isEnabled = true
-        val count = fragmentCameraBinding.lensSelectorContainer?.childCount ?: 0
-        for (i in 0 until count) {
-            fragmentCameraBinding.lensSelectorContainer?.getChildAt(i)?.isEnabled = true
-        }
     }
 
     private fun updateLensHighlight() {
-        val container = fragmentCameraBinding.lensSelectorContainer ?: return
-        for (i in 0 until container.childCount) {
-            val button = container.getChildAt(i) as com.google.android.material.button.MaterialButton
-            val cameraId = allCameraIds.getOrNull(i)
-            if (cameraId == currentCameraId) {
-                button.setBackgroundColor(getPrimaryColor()) 
-                button.setTextColor(Color.BLACK)
-                button.alpha = 1.0f
-            } else {
-                button.setBackgroundColor("#33FFFFFF".toColorInt()) // 20% white
-                button.setTextColor(Color.WHITE)
-                button.alpha = 0.8f
-            }
-            button.strokeWidth = 0
+        val selectedIndex = allCameraIds.indexOf(currentCameraId)
+        if (selectedIndex >= 0) {
+            fragmentCameraBinding.lensSelector?.setSelectedIndex(selectedIndex)
         }
     }
 
@@ -2340,13 +2501,9 @@ class CameraFragment : Fragment() {
             updateSettingsUI()
         }
         
-        // Disable UI during initialization (lens buttons too, so the user can't
-        // bounce between lenses faster than the camera service can re-open).
+        // The lens strip remains responsive during a drag: initializeCamera()
+        // cancels an older job, so the final lens reached by the gesture wins.
         isCameraInitializing = true
-        val lensContainer = fragmentCameraBinding.lensSelectorContainer
-        for (i in 0 until (lensContainer?.childCount ?: 0)) {
-            lensContainer?.getChildAt(i)?.isEnabled = false
-        }
 
         cameraJob = lifecycleScope.launch(Dispatchers.Main) {
             var initialized = false
@@ -2656,6 +2813,7 @@ class CameraFragment : Fragment() {
     private fun handleCaptureClick(button: View) {
         Log.d(TAG, "handleCaptureClick called. session.isInitialized = ${::session.isInitialized}")
         if (!::session.isInitialized) return
+        setInlineFilmModeDialExpanded(false)
         
         // Provide haptic feedback for shutter
         button.performHapticFeedback(HapticFeedbackConstants.VIRTUAL_KEY)
@@ -2675,23 +2833,29 @@ class CameraFragment : Fragment() {
                 }
             } else rawFrozen
             showProgress(CaptureProgress.Saving(frozen))
+            updateDevelopProgress(10)
             try {
                 val captured = withContext(Dispatchers.IO) { takePhoto() }
+                updateDevelopProgress(30)
                 val saved: SaveOutput = captured.use { result ->
                     when {
                         // RAW capture + user wants JPEG or WebP → demosaic into a Bitmap
                         // first, then encode as JPEG/WebP. The same demosaiced bitmap
                         // doubles as the source for the on-screen preview.
                         result.format == ImageFormat.RAW_SENSOR && (outputFormat == OutputFormat.JPEG || outputFormat == OutputFormat.WEBP) -> {
+                            updateDevelopProgress(40)
                             val bitmap = withContext(Dispatchers.IO) { rawToBitmap(result) }
+                            updateDevelopProgress(62)
                             try {
                                 val croppedBitmap = cropToAspectRatio(bitmap)
+                                updateDevelopProgress(70)
                                 // Apply the selected film simulation. NORMAL is a
                                 // no-op and returns the same bitmap; otherwise the
                                 // result may be a new mutable bitmap.
                                 val finalBitmap = withContext(Dispatchers.Default) {
                                     FilmFilter.apply(croppedBitmap, filmSimulation)
                                 }
+                                updateDevelopProgress(80)
                                 try {
                                     val file = withContext(Dispatchers.IO) {
                                         if (outputFormat == OutputFormat.WEBP) {
@@ -2700,7 +2864,9 @@ class CameraFragment : Fragment() {
                                             writeBitmapAsJpeg(finalBitmap)
                                         }
                                     }
+                                    updateDevelopProgress(92)
                                     val thumb = withContext(Dispatchers.Default) { makeThumbnail(finalBitmap) }
+                                    updateDevelopProgress(97)
                                     SaveOutput(file, thumb)
                                 } finally {
                                     if (finalBitmap !== croppedBitmap && !finalBitmap.isRecycled) {
@@ -2716,11 +2882,17 @@ class CameraFragment : Fragment() {
                         }
                         // RAW capture + user wants RAW → write DNG straight through.
                         result.format == ImageFormat.RAW_SENSOR -> {
-                            withContext(Dispatchers.IO) { writeRawAsDng(result) }
+                            updateDevelopProgress(50)
+                            val output = withContext(Dispatchers.IO) { writeRawAsDng(result) }
+                            updateDevelopProgress(97)
+                            output
                         }
                         // Direct-JPEG fallback (camera doesn't support RAW).
                         result.format == ImageFormat.JPEG -> {
-                            withContext(Dispatchers.IO) { writeJpegBytes(result) }
+                            updateDevelopProgress(50)
+                            val output = withContext(Dispatchers.IO) { writeJpegBytes(result) }
+                            updateDevelopProgress(97)
+                            output
                         }
                         else -> throw RuntimeException("Unsupported capture format: ${result.format}")
                     }
@@ -2729,8 +2901,8 @@ class CameraFragment : Fragment() {
                 // Done state stays up until the user taps "Take new" on the
                 // capture button — re-enable the button so it can act as
                 // that dismiss control.
-                setProcessing(false)
                 showProgress(CaptureProgress.Done(saved.thumbnail))
+                setProcessing(false, completed = true)
                 button.isEnabled = true
             } catch (exc: Exception) {
                 Log.e(TAG, "Photo capture failed", exc)
@@ -3277,7 +3449,9 @@ class CameraFragment : Fragment() {
             putString("pref_video_aspect_ratio", videoAspectRatio.name)
             putBoolean("pref_is_square", aspectRatio == AspectRatio.RATIO_1_1)
             putInt("pref_flash_mode", flashMode)
-            putString("pref_film_simulation", filmSimulation.name)
+            // Video temporarily uses the identity simulation for its separate
+            // analogue-look pipeline. Persist the user's photo look instead.
+            putString("pref_film_simulation", savedPhotoFilmSimulation.name)
             putBoolean("pref_is_video_mode", isVideoMode)
             putInt("pref_video_fps", videoFrameRate)
             putString("pref_video_resolution", videoResolution.name)
@@ -3299,6 +3473,12 @@ class CameraFragment : Fragment() {
     }
 
     override fun onDestroyView() {
+        filmModeDialAnimator?.cancel()
+        filmModeDialAnimator = null
+        isFilmModeDialExpanded = false
+        developProgressAnimator?.cancel()
+        developProgressAnimator = null
+        isDevelopProgressVisible = false
         doneThumbnail?.takeIf { !it.isRecycled }?.recycle()
         doneThumbnail = null
         frozenThumbnail?.takeIf { !it.isRecycled }?.recycle()
