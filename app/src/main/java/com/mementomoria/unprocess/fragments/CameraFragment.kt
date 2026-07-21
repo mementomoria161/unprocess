@@ -552,12 +552,10 @@ class CameraFragment : Fragment() {
     }
 
     private fun updateFlashUI() {
-        val iconRes = if (flashMode == CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH) {
-            R.drawable.ic_flash_on_new
-        } else {
-            R.drawable.ic_flash_off_new
-        }
-        fragmentCameraBinding.flashToggle?.text = ""
+        val flashEnabled = flashMode == CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH
+        val iconRes = if (flashEnabled) R.drawable.ic_flash_on_new else R.drawable.ic_flash_off_new
+        fragmentCameraBinding.flashToggle?.text = if (flashEnabled) "Flash On" else "Flash Off"
+        fragmentCameraBinding.flashToggle?.contentDescription = if (flashEnabled) "Turn flash off" else "Turn flash on"
         fragmentCameraBinding.flashToggle?.setIconResource(iconRes)
     }
 
@@ -710,6 +708,12 @@ class CameraFragment : Fragment() {
                 if (cameraId != currentCameraId) switchCamera(cameraId)
             }
         }
+        selector?.onExpansionChanged = { expanded ->
+            // The high-layer settings button would otherwise cover the
+            // horizontal lens strip while it is being dragged.
+            _fragmentCameraBinding?.settingsToggle?.visibility =
+                if (expanded) View.INVISIBLE else View.VISIBLE
+        }
         updateLensHighlight()
     }
 
@@ -743,14 +747,17 @@ class CameraFragment : Fragment() {
         val panel = binding.settingsPanel ?: return
         val overlay = binding.settingsDimOverlay ?: return
         
-        val toggles = listOfNotNull(
-            binding.aspectRatioToggle,
-            binding.resolutionToggle,
+        val menuItems = listOfNotNull<View>(
+            binding.modeToggle,
             binding.framerateToggle,
-            binding.modeToggle
+            binding.resolutionToggle,
+            binding.aspectRatioToggle,
+            binding.flashToggle,
+            binding.galleryButton,
+            binding.modeSelectionPill,
         ).filter { it.visibility == View.VISIBLE }
         
-        if (toggles.isEmpty()) {
+        if (menuItems.isEmpty()) {
             isAnimatingSettings = false
             if (!open) {
                 panel.visibility = View.GONE
@@ -764,7 +771,7 @@ class CameraFragment : Fragment() {
         if (open) {
             // Cancel any running animations
             overlay.animate().cancel()
-            toggles.forEach { it.animate().cancel() }
+            menuItems.forEach { it.animate().cancel() }
             
             // Set initial state
             overlay.visibility = View.VISIBLE
@@ -778,14 +785,17 @@ class CameraFragment : Fragment() {
             panel.visibility = View.VISIBLE
             
             val startTranslationX = 100.dpToPx().toFloat()
-            toggles.forEachIndexed { index, button ->
-                button.alpha = 0f
-                button.scaleX = 0.3f
-                button.scaleY = 0.3f
-                button.translationX = startTranslationX
-                button.translationY = 0f
+            // The menu unfolds from its bottom-most visible item upward.
+            // In video mode this is: mode, gallery, flash, aspect ratio,
+            // resolution, then frame rate.
+            menuItems.asReversed().forEachIndexed { index, item ->
+                item.alpha = 0f
+                item.scaleX = 0.3f
+                item.scaleY = 0.3f
+                item.translationX = startTranslationX
+                item.translationY = 0f
                 
-                button.animate()
+                item.animate()
                     .alpha(1f)
                     .scaleX(1f)
                     .scaleY(1f)
@@ -794,7 +804,7 @@ class CameraFragment : Fragment() {
                     .setDuration(280L)
                     .setStartDelay(index * 60L)
                     .setInterpolator(android.view.animation.OvershootInterpolator(2.2f))
-                    .setListener(if (index == toggles.lastIndex) {
+                    .setListener(if (index == menuItems.lastIndex) {
                         object : android.animation.AnimatorListenerAdapter() {
                             override fun onAnimationEnd(animation: android.animation.Animator) {
                                 isAnimatingSettings = false
@@ -806,7 +816,7 @@ class CameraFragment : Fragment() {
         } else {
             // Cancel any running animations
             overlay.animate().cancel()
-            toggles.forEach { it.animate().cancel() }
+            menuItems.forEach { it.animate().cancel() }
             
             overlay.animate()
                 .alpha(0f)
@@ -819,9 +829,8 @@ class CameraFragment : Fragment() {
                 .start()
                 
             val endTranslationX = 100.dpToPx().toFloat()
-            val reversedToggles = toggles.reversed()
-            reversedToggles.forEachIndexed { index, button ->
-                button.animate()
+            menuItems.forEachIndexed { index, item ->
+                item.animate()
                     .alpha(0f)
                     .scaleX(0.3f)
                     .scaleY(0.3f)
@@ -830,7 +839,7 @@ class CameraFragment : Fragment() {
                     .setDuration(200L)
                     .setStartDelay(index * 50L)
                     .setInterpolator(android.view.animation.AccelerateInterpolator())
-                    .setListener(if (index == reversedToggles.lastIndex) {
+                    .setListener(if (index == menuItems.lastIndex) {
                         object : android.animation.AnimatorListenerAdapter() {
                             override fun onAnimationEnd(animation: android.animation.Animator) {
                                 panel.visibility = View.GONE
@@ -857,11 +866,15 @@ class CameraFragment : Fragment() {
         binding.settingsToggle?.isEnabled = settingsAvailable
         binding.settingsToggle?.let { setButtonActiveStyle(it, isSettingsMode && settingsAvailable) }
         
-        // Flash is always tappable, but only highlighted while it is on.
+        // Gallery and flash now live in the settings menu as full labelled rows.
+        binding.galleryButton?.isEnabled = settingsAvailable
+        setButtonActiveStyle(binding.galleryButton, false)
+
         binding.flashToggle?.visibility = View.VISIBLE
+        binding.flashToggle?.isEnabled = settingsAvailable
         setButtonActiveStyle(
             binding.flashToggle,
-            flashMode == CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH,
+            settingsAvailable && flashMode == CaptureRequest.CONTROL_AE_MODE_ON_ALWAYS_FLASH,
         )
 
         // Update selector visibilities based on Video Mode
@@ -881,6 +894,9 @@ class CameraFragment : Fragment() {
             
             if (isSettingsMode) {
                 listOfNotNull(
+                    binding.modeSelectionPill,
+                    binding.galleryButton,
+                    binding.flashToggle,
                     binding.aspectRatioToggle,
                     binding.resolutionToggle,
                     binding.framerateToggle,
@@ -954,23 +970,45 @@ class CameraFragment : Fragment() {
         
         val activeColor = getOnPrimaryColor()
         val inactiveColor = getOnSecondaryContainerColor()
+
+        fun updateModeOption(
+            button: com.google.android.material.button.MaterialButton?,
+            selected: Boolean,
+            label: String,
+            contentDescription: String,
+        ) {
+            button ?: return
+            button.text = if (selected) label else ""
+            button.contentDescription = contentDescription
+            button.setTextColor(if (selected) activeColor else inactiveColor)
+            button.iconTint = ColorStateList.valueOf(if (selected) activeColor else inactiveColor)
+            button.iconPadding = if (selected) 8.dpToPx() else 0
+            button.setPaddingRelative(
+                if (selected) 16.dpToPx() else 0,
+                0,
+                if (selected) 16.dpToPx() else 0,
+                0,
+            )
+            button.layoutParams = button.layoutParams.apply {
+                width = if (selected) ViewGroup.LayoutParams.WRAP_CONTENT else 56.dpToPx()
+            }
+            button.backgroundTintList = ColorStateList.valueOf(
+                if (selected) getPrimaryColor() else Color.TRANSPARENT,
+            )
+        }
         
         if (!isVideoMode) {
             // Camera is selected
-            binding.cameraToggle?.backgroundTintList = ColorStateList.valueOf(getPrimaryColor())
-            binding.cameraToggle?.iconTint = ColorStateList.valueOf(activeColor)
+            updateModeOption(binding.cameraToggle, true, "Camera", "Camera mode selected")
             
             // Video is unselected
-            binding.videoToggle?.backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
-            binding.videoToggle?.iconTint = ColorStateList.valueOf(inactiveColor)
+            updateModeOption(binding.videoToggle, false, "Video", "Switch to video mode")
         } else {
             // Video is selected
-            binding.videoToggle?.backgroundTintList = ColorStateList.valueOf(getPrimaryColor())
-            binding.videoToggle?.iconTint = ColorStateList.valueOf(activeColor)
+            updateModeOption(binding.videoToggle, true, "Video", "Video mode selected")
             
             // Camera is unselected
-            binding.cameraToggle?.backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
-            binding.cameraToggle?.iconTint = ColorStateList.valueOf(inactiveColor)
+            updateModeOption(binding.cameraToggle, false, "Camera", "Switch to camera mode")
         }
     }
 
@@ -1858,7 +1896,12 @@ class CameraFragment : Fragment() {
             val systemBars = insets?.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
             val bottomInset = systemBars?.bottom ?: 0
             val wMax = maxOf(1, resources.displayMetrics.widthPixels - 32.dpToPx())
-            val hMax = maxOf(1, resources.displayMetrics.heightPixels - 311.dpToPx() - bottomInset)
+            // The viewfinder now begins at the top of the screen. Its only
+            // vertical neighbours are its own 16dp margins, the 104dp capture
+            // button and the bottom capture-control offset (48dp + inset).
+            // The previous 311dp budget still reserved room for the removed
+            // top controls, making wide ratios such as 16:9 unnecessarily small.
+            val hMax = maxOf(1, resources.displayMetrics.heightPixels - 184.dpToPx() - bottomInset)
             val availableRatio = wMax.toFloat() / hMax.toFloat()
             val targetRatio = targetW.toFloat() / targetH.toFloat()
 
@@ -1876,17 +1919,7 @@ class CameraFragment : Fragment() {
             constraintSet.constrainedWidth(R.id.view_finder_container, true)
             constraintSet.constrainedHeight(R.id.view_finder_container, true)
 
-            if (aspectRatio == AspectRatio.RATIO_16_9) {
-                val ratio43Ratio = if (needsSwap) 3f / 4f else 4f / 3f
-                val height43 = if (ratio43Ratio > availableRatio) {
-                    (wMax / ratio43Ratio).toInt()
-                } else {
-                    hMax
-                }
-                constraintSet.constrainMaxHeight(R.id.view_finder_container, height43)
-            } else {
-                constraintSet.constrainMaxHeight(R.id.view_finder_container, Int.MAX_VALUE)
-            }
+            constraintSet.constrainMaxHeight(R.id.view_finder_container, Int.MAX_VALUE)
 
             constraintSet.applyTo(fragmentCameraBinding.root as androidx.constraintlayout.widget.ConstraintLayout)
         } catch (e: Exception) {

@@ -34,7 +34,7 @@
         android:clipToOutline="true"
         app:layout_constrainedWidth="true"
         app:layout_constrainedHeight="true"
-        app:layout_constraintTop_toBottomOf="@+id/top_controls"
+        app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintBottom_toTopOf="@+id/capture_button"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
@@ -246,152 +246,7 @@
         android:focusable="true"
         android:visibility="gone" />
 
-    <!-- Top control buttons drawn over the dim overlay -->
-    <LinearLayout
-        android:id="@+id/top_controls"
-        android:layout_width="wrap_content"
-        android:layout_height="56dp"
-        android:layout_marginTop="79dp"
-        android:gravity="center_vertical"
-        android:orientation="horizontal"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
-        app:layout_constraintEnd_toEndOf="parent">
-
-        <com.google.android.material.card.MaterialCardView
-            android:id="@+id/mode_selection_pill"
-            android:layout_width="112dp"
-            android:layout_height="56dp"
-            app:cardBackgroundColor="?attr/colorSecondaryContainer"
-            app:cardCornerRadius="28dp"
-            app:cardElevation="0dp"
-            app:strokeWidth="0dp"
-            android:clipToOutline="true"
-            app:contentPadding="0dp"
-            app:cardPreventCornerOverlap="false"
-            app:cardUseCompatPadding="false">
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="match_parent"
-                android:orientation="horizontal">
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/camera_toggle"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="56dp"
-                    android:layout_height="56dp"
-                    android:padding="12dp"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:insetLeft="0dp"
-                    android:insetRight="0dp"
-                    android:minWidth="0dp"
-                    android:minHeight="0dp"
-                    app:icon="@drawable/ic_photo_camera"
-                    app:iconGravity="textStart"
-                    app:iconPadding="0dp"
-                    app:iconSize="24dp"
-                    app:cornerRadius="28dp"
-                    app:strokeWidth="0dp"
-                    app:backgroundTint="@android:color/transparent" />
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/video_toggle"
-                    style="@style/Widget.Material3.Button.TonalButton"
-                    android:layout_width="56dp"
-                    android:layout_height="56dp"
-                    android:padding="12dp"
-                    android:insetTop="0dp"
-                    android:insetBottom="0dp"
-                    android:insetLeft="0dp"
-                    android:insetRight="0dp"
-                    android:minWidth="0dp"
-                    android:minHeight="0dp"
-                    app:icon="@drawable/ic_videocam"
-                    app:iconGravity="textStart"
-                    app:iconPadding="0dp"
-                    app:iconSize="24dp"
-                    app:cornerRadius="28dp"
-                    app:strokeWidth="0dp"
-                    app:backgroundTint="@android:color/transparent" />
-
-            </LinearLayout>
-
-        </com.google.android.material.card.MaterialCardView>
-
-        <Space
-            android:layout_width="8dp"
-            android:layout_height="1dp"
-            />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/gallery_button"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
-            android:padding="12dp"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:contentDescription="@string/gallery"
-            app:icon="@drawable/ic_gallery"
-            app:iconGravity="textStart"
-            app:iconPadding="0dp"
-            app:iconSize="24dp"
-            app:shapeAppearanceOverlay="@style/ShapeAppearance.Material3.Corner.Full" />
-
-        <Space
-            android:layout_width="8dp"
-            android:layout_height="1dp"
-            />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/flash_toggle"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
-            android:padding="12dp"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            app:iconGravity="textStart"
-            app:iconPadding="0dp"
-            app:iconSize="24dp"
-            app:shapeAppearanceOverlay="@style/ShapeAppearance.Material3.Corner.Full" />
-
-        <Space
-            android:layout_width="8dp"
-            android:layout_height="1dp"
-            />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/settings_toggle"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
-            android:padding="12dp"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            app:icon="@drawable/ic_settings_new"
-            app:iconGravity="textStart"
-            app:iconPadding="0dp"
-            app:iconSize="24dp"
-            app:shapeAppearanceOverlay="@style/ShapeAppearance.Material3.Corner.Full" />
-
-    </LinearLayout>
-
-    <!-- Vertical settings menu panel that pops down under the settings gear -->
+    <!-- Settings menu anchored inside the viewfinder's lower-right corner. -->
     <LinearLayout
         android:id="@+id/settings_panel"
         android:layout_width="wrap_content"
@@ -401,18 +256,18 @@
         android:visibility="gone"
         android:clipChildren="false"
         android:clipToPadding="false"
-        app:layout_constraintTop_toBottomOf="@+id/top_controls"
-        app:layout_constraintEnd_toEndOf="@+id/top_controls"
-        android:layout_marginTop="16dp">
+        android:layout_marginBottom="8dp"
+        app:layout_constraintBottom_toTopOf="@+id/settings_toggle"
+        app:layout_constraintEnd_toEndOf="@+id/settings_toggle">
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/aspect_ratio_toggle"
+            android:id="@+id/mode_toggle"
             style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="wrap_content"
             android:layout_height="56dp"
             android:layout_marginBottom="8dp"
             android:layout_gravity="end"
-            android:text="@string/aspect_ratio_full"
+            android:text="JPEG"
             android:textSize="16sp"
             android:maxLines="1"
             android:insetTop="0dp"
@@ -423,31 +278,7 @@
             android:minHeight="0dp"
             android:paddingStart="64dp"
             android:paddingEnd="64dp"
-            app:icon="@drawable/ic_aspect_ratio_new"
-            app:iconPadding="8dp"
-            app:iconSize="24dp"
-            app:iconGravity="start" />
-
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/resolution_toggle"
-            style="@style/Widget.Material3.Button.TonalButton"
-            android:layout_width="wrap_content"
-            android:layout_height="56dp"
-            android:layout_marginBottom="8dp"
-            android:layout_gravity="end"
-            android:text="1080p"
-            android:textSize="16sp"
-            android:maxLines="1"
-            android:insetTop="0dp"
-            android:insetBottom="0dp"
-            android:insetLeft="0dp"
-            android:insetRight="0dp"
-            android:minWidth="0dp"
-            android:minHeight="0dp"
-            android:visibility="gone"
-            android:paddingStart="64dp"
-            android:paddingEnd="64dp"
-            app:icon="@drawable/ic_mp"
+            app:icon="@drawable/ic_save"
             app:iconPadding="8dp"
             app:iconSize="24dp"
             app:iconGravity="start" />
@@ -477,12 +308,37 @@
             app:iconGravity="start" />
 
         <com.google.android.material.button.MaterialButton
-            android:id="@+id/mode_toggle"
+            android:id="@+id/resolution_toggle"
             style="@style/Widget.Material3.Button.TonalButton"
             android:layout_width="wrap_content"
             android:layout_height="56dp"
+            android:layout_marginBottom="8dp"
             android:layout_gravity="end"
-            android:text="JPEG"
+            android:text="1080p"
+            android:textSize="16sp"
+            android:maxLines="1"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:visibility="gone"
+            android:paddingStart="64dp"
+            android:paddingEnd="64dp"
+            app:icon="@drawable/ic_mp"
+            app:iconPadding="8dp"
+            app:iconSize="24dp"
+            app:iconGravity="start" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/aspect_ratio_toggle"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="56dp"
+            android:layout_marginBottom="8dp"
+            android:layout_gravity="end"
+            android:text="@string/aspect_ratio_full"
             android:textSize="16sp"
             android:maxLines="1"
             android:insetTop="0dp"
@@ -493,11 +349,146 @@
             android:minHeight="0dp"
             android:paddingStart="64dp"
             android:paddingEnd="64dp"
-            app:icon="@drawable/ic_save"
+            app:icon="@drawable/ic_aspect_ratio_new"
             app:iconPadding="8dp"
             app:iconSize="24dp"
             app:iconGravity="start" />
 
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/flash_toggle"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="56dp"
+            android:layout_marginBottom="8dp"
+            android:layout_gravity="end"
+            android:text="Flash Off"
+            android:textSize="16sp"
+            android:maxLines="1"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="64dp"
+            android:paddingEnd="64dp"
+            app:icon="@drawable/ic_flash_off_new"
+            app:iconPadding="8dp"
+            app:iconSize="24dp"
+            app:iconGravity="start" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/gallery_button"
+            style="@style/Widget.Material3.Button.TonalButton"
+            android:layout_width="wrap_content"
+            android:layout_height="56dp"
+            android:layout_marginBottom="8dp"
+            android:layout_gravity="end"
+            android:text="View Gallery"
+            android:textSize="16sp"
+            android:maxLines="1"
+            android:contentDescription="@string/gallery"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
+            android:insetLeft="0dp"
+            android:insetRight="0dp"
+            android:minWidth="0dp"
+            android:minHeight="0dp"
+            android:paddingStart="64dp"
+            android:paddingEnd="64dp"
+            app:icon="@drawable/ic_gallery"
+            app:iconPadding="8dp"
+            app:iconSize="24dp"
+            app:iconGravity="start" />
+
+        <com.google.android.material.card.MaterialCardView
+            android:id="@+id/mode_selection_pill"
+            android:layout_width="wrap_content"
+            android:layout_height="56dp"
+            android:layout_gravity="end"
+            app:cardBackgroundColor="?attr/colorSecondaryContainer"
+            app:cardCornerRadius="28dp"
+            app:cardElevation="0dp"
+            app:strokeWidth="0dp"
+            android:clipToOutline="true"
+            app:contentPadding="0dp"
+            app:cardPreventCornerOverlap="false"
+            app:cardUseCompatPadding="false">
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="match_parent"
+                android:orientation="horizontal">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/camera_toggle"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="56dp"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:insetLeft="0dp"
+                    android:insetRight="0dp"
+                    android:minWidth="56dp"
+                    android:minHeight="0dp"
+                    app:icon="@drawable/ic_photo_camera"
+                    app:iconGravity="textStart"
+                    app:iconPadding="8dp"
+                    app:iconSize="24dp"
+                    app:cornerRadius="28dp"
+                    app:strokeWidth="0dp"
+                    app:backgroundTint="@android:color/transparent" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/video_toggle"
+                    style="@style/Widget.Material3.Button.TonalButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="56dp"
+                    android:paddingStart="16dp"
+                    android:paddingEnd="16dp"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:insetLeft="0dp"
+                    android:insetRight="0dp"
+                    android:minWidth="56dp"
+                    android:minHeight="0dp"
+                    app:icon="@drawable/ic_videocam"
+                    app:iconGravity="textStart"
+                    app:iconPadding="8dp"
+                    app:iconSize="24dp"
+                    app:cornerRadius="28dp"
+                    app:strokeWidth="0dp"
+                    app:backgroundTint="@android:color/transparent" />
+
+            </LinearLayout>
+
+        </com.google.android.material.card.MaterialCardView>
+
     </LinearLayout>
+
+    <!-- Above the dim overlay; hidden while the lens selector is expanded. -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/settings_toggle"
+        style="@style/Widget.Material3.Button.TonalButton"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:layout_marginEnd="16dp"
+        android:layout_marginBottom="16dp"
+        android:padding="12dp"
+        android:insetTop="0dp"
+        android:insetBottom="0dp"
+        android:insetLeft="0dp"
+        android:insetRight="0dp"
+        android:minWidth="0dp"
+        android:minHeight="0dp"
+        app:icon="@drawable/ic_settings_new"
+        app:iconGravity="textStart"
+        app:iconPadding="0dp"
+        app:iconSize="24dp"
+        app:shapeAppearanceOverlay="@style/ShapeAppearance.Material3.Corner.Full"
+        app:layout_constraintBottom_toBottomOf="@+id/view_finder_container"
+        app:layout_constraintEnd_toEndOf="@+id/view_finder_container" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

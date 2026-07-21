@@ -1,6 +1,6 @@
-# Gradle files
+# Gradle files and every module's compiled output
 .gradle/
-build/
+**/build/
 .kotlin/
 
 # Local configuration file (sdk path, etc)
@@ -14,6 +14,11 @@ captures/
 .externalNativeBuild/
 .cxx/
 *.apk
+*.aab
+*.ap_
+*.aar
+*.dex
+*.class
 output.json
 
 # IntelliJ

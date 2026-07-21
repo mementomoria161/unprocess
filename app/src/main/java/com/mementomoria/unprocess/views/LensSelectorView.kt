@@ -30,6 +30,7 @@ class LensSelectorView @JvmOverloads constructor(
 ) : View(context, attrs, defStyleAttr) {
 
     var onLensSelected: ((Int) -> Unit)? = null
+    var onExpansionChanged: ((Boolean) -> Unit)? = null
 
     private val density = resources.displayMetrics.density
     private val compactDiameter = 56.dp
@@ -223,6 +224,7 @@ class LensSelectorView @JvmOverloads constructor(
     private fun setExpanded(expanded: Boolean) {
         if (isExpanded == expanded) return
         isExpanded = expanded
+        onExpansionChanged?.invoke(expanded)
         expandAnimator?.cancel()
         val start = expansionProgress
         val target = if (expanded) 1f else 0f
