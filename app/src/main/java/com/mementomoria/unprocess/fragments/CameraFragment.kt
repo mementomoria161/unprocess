@@ -184,6 +184,13 @@ class CameraFragment : Fragment() {
     private var isCameraInitializing = false
     private var isFilmModeDialExpanded = false
     private var filmModeDialAnimator: ValueAnimator? = null
+    private var captureControlsAnimator: ValueAnimator? = null
+    private var modeSelectionAnimator: ValueAnimator? = null
+    private var modeSelectionIndicator: android.graphics.drawable.Drawable? = null
+    private var modeSelectionRevealTarget: View? = null
+    private var modeSelectionInactiveIcon: android.widget.ImageView? = null
+    private var captureControlsHidden = false
+    private var captureControlsToRestore: List<View> = emptyList()
     private var developProgressAnimator: ValueAnimator? = null
     private var displayedDevelopProgress = 0
     private var isDevelopProgressVisible = false
@@ -470,6 +477,7 @@ class CameraFragment : Fragment() {
                     lp.bottomMargin = 48.dpToPx() + systemBars.bottom
                     v.layoutParams = lp
                 } else if (v.id == R.id.capture_button) {
+                    lp.bottomMargin = 48.dpToPx() + systemBars.bottom
                     lp.marginEnd = 32.dpToPx() + systemBars.right
                     v.layoutParams = lp
                 }
@@ -1039,7 +1047,9 @@ class CameraFragment : Fragment() {
     private fun setInlineFilmModeDialExpanded(expanded: Boolean, animate: Boolean = true) {
         val binding = _fragmentCameraBinding ?: return
         if (expanded && binding.filmModeToggle?.isEnabled != true) return
-        if (isFilmModeDialExpanded == expanded) return
+        // A capture may need to collapse an in-flight dial animation
+        // synchronously before its own bottom-bar transition starts.
+        if (isFilmModeDialExpanded == expanded && (animate || filmModeDialAnimator == null)) return
 
         val container = binding.filmModeContainer ?: return
         val dial = binding.inlineFilmModeDial ?: return
@@ -1115,6 +1125,383 @@ class CameraFragment : Fragment() {
         }
     }
 
+    /** A moving fill that is drawn behind, never on top of, the mode labels. */
+    private class SlidingModePillDrawable(
+        color: Int,
+        private val cornerRadius: Float,
+    ) : android.graphics.drawable.Drawable() {
+        private val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+            this.color = color
+        }
+        private val segment = android.graphics.RectF()
+
+        fun setSegment(bounds: android.graphics.Rect) {
+            segment.set(bounds)
+            invalidateSelf()
+        }
+
+        override fun draw(canvas: android.graphics.Canvas) {
+            canvas.drawRoundRect(segment, cornerRadius, cornerRadius, paint)
+        }
+
+        override fun setAlpha(alpha: Int) {
+            paint.alpha = alpha
+            invalidateSelf()
+        }
+
+        override fun setColorFilter(colorFilter: android.graphics.ColorFilter?) {
+            paint.colorFilter = colorFilter
+            invalidateSelf()
+        }
+
+        @Deprecated("Deprecated in Java")
+        override fun getOpacity(): Int = android.graphics.PixelFormat.TRANSLUCENT
+    }
+
+    private data class ModeIconSnapshot(
+        val drawable: android.graphics.drawable.Drawable,
+        val tint: Int,
+    )
+
+    /** Copies the untouched icon the user tapped before the mode state changes. */
+    private fun snapshotModeIcon(
+        button: com.google.android.material.button.MaterialButton?,
+    ): ModeIconSnapshot? {
+        val original = button?.icon ?: return null
+        val copy = original.constantState?.newDrawable()?.mutate() ?: return null
+        return ModeIconSnapshot(
+            drawable = copy,
+            tint = button.iconTint?.defaultColor ?: getOnSecondaryContainerColor(),
+        )
+    }
+
+    /** Returns a segment's bounds in the mode track's background coordinate system. */
+    private fun modeSegmentBounds(button: View?, track: View?): android.graphics.Rect? {
+        if (button == null || track == null || button.width == 0 || button.height == 0) return null
+        val trackLocation = IntArray(2)
+        val buttonLocation = IntArray(2)
+        track.getLocationOnScreen(trackLocation)
+        button.getLocationOnScreen(buttonLocation)
+        return android.graphics.Rect(
+            buttonLocation[0] - trackLocation[0],
+            buttonLocation[1] - trackLocation[1],
+            buttonLocation[0] - trackLocation[0] + button.width,
+            buttonLocation[1] - trackLocation[1] + button.height,
+        )
+    }
+
+    private fun clearModeSelectionAnimation() {
+        modeSelectionAnimator?.cancel()
+        modeSelectionAnimator = null
+        _fragmentCameraBinding?.modeSelectionSegmentTrack?.background = null
+        modeSelectionInactiveIcon?.let { icon ->
+            _fragmentCameraBinding?.modeSelectionSegmentTrack?.overlay?.remove(icon)
+        }
+        modeSelectionInactiveIcon = null
+        modeSelectionIndicator = null
+        modeSelectionRevealTarget?.clipBounds = null
+        modeSelectionRevealTarget = null
+    }
+
+    /** Slides one continuous filled segment from Camera to Video (or back). */
+    private fun animateModeSelectionPill(
+        startBounds: android.graphics.Rect?,
+        startPillWidth: Int,
+        tappedBounds: android.graphics.Rect?,
+        tappedIcon: ModeIconSnapshot?,
+        toVideoMode: Boolean,
+    ) {
+        val binding = _fragmentCameraBinding ?: return
+        val pill = binding.modeSelectionPill ?: return
+        val track = binding.modeSelectionSegmentTrack ?: return
+        val selected = if (toVideoMode) binding.videoToggle else binding.cameraToggle
+        if (startBounds == null || pill.visibility != View.VISIBLE) return
+
+        clearModeSelectionAnimation()
+        selected.backgroundTintList = ColorStateList.valueOf(Color.TRANSPARENT)
+        // The active text/icon already receive their final dark tint from
+        // updateMovieToggleUI(), but are clipped until the travelling fill
+        // actually reaches their part of the control.
+        selected.clipBounds = android.graphics.Rect(0, 0, 0, selected.height)
+        modeSelectionRevealTarget = selected
+        val indicator = SlidingModePillDrawable(getPrimaryColor(), 28.dpToPx().toFloat()).apply {
+            setSegment(startBounds)
+        }
+        modeSelectionIndicator = indicator
+        track.background = indicator
+        val inactiveIcon = if (tappedIcon != null && tappedBounds != null) {
+            android.widget.ImageView(requireContext()).apply {
+                setImageDrawable(tappedIcon.drawable)
+                imageTintList = ColorStateList.valueOf(tappedIcon.tint)
+                scaleType = android.widget.ImageView.ScaleType.CENTER
+                layout(tappedBounds.left, tappedBounds.top, tappedBounds.right, tappedBounds.bottom)
+            }
+        } else {
+            null
+        }
+        inactiveIcon?.let { icon ->
+            track.overlay.add(icon)
+            modeSelectionInactiveIcon = icon
+        }
+
+        selected.post {
+            val endBounds = modeSegmentBounds(selected, track)
+            val targetPillWidth = pill.width
+            if (endBounds == null || _fragmentCameraBinding == null) {
+                track.background = null
+                inactiveIcon?.let(track.overlay::remove)
+                selected.clipBounds = null
+                selected.backgroundTintList = ColorStateList.valueOf(getPrimaryColor())
+                modeSelectionIndicator = null
+                modeSelectionRevealTarget = null
+                return@post
+            }
+
+            val pillParams = pill.layoutParams
+            val animatePillWidth = startPillWidth > 0 && targetPillWidth > 0 &&
+                startPillWidth != targetPillWidth
+            if (animatePillWidth) {
+                pillParams.width = startPillWidth
+                pill.layoutParams = pillParams
+            }
+
+            modeSelectionAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = 280L
+                interpolator = android.view.animation.DecelerateInterpolator()
+                addUpdateListener { animator ->
+                    val progress = animator.animatedValue as Float
+                    val indicatorBounds = android.graphics.Rect(
+                        (startBounds.left + (endBounds.left - startBounds.left) * progress).toInt(),
+                        (startBounds.top + (endBounds.top - startBounds.top) * progress).toInt(),
+                        (startBounds.right + (endBounds.right - startBounds.right) * progress).toInt(),
+                        (startBounds.bottom + (endBounds.bottom - startBounds.bottom) * progress).toInt(),
+                    )
+                    indicator.setSegment(indicatorBounds)
+                    val revealLeft = (indicatorBounds.left - endBounds.left).coerceIn(0, selected.width)
+                    val revealRight = (indicatorBounds.right - endBounds.left).coerceIn(0, selected.width)
+                    selected.clipBounds = android.graphics.Rect(
+                        minOf(revealLeft, revealRight),
+                        0,
+                        maxOf(revealLeft, revealRight),
+                        selected.height,
+                    )
+                    inactiveIcon?.let { icon ->
+                        val coveredLeft = maxOf(indicatorBounds.left, tappedBounds!!.left)
+                        val coveredRight = minOf(indicatorBounds.right, tappedBounds.right)
+                        val coveredWidth = (coveredRight - coveredLeft).coerceAtLeast(0)
+                        icon.alpha = 1f - coveredWidth.toFloat() / tappedBounds.width().coerceAtLeast(1)
+                    }
+                    if (animatePillWidth) {
+                        pillParams.width = (startPillWidth +
+                            (targetPillWidth - startPillWidth) * progress).toInt()
+                        pill.layoutParams = pillParams
+                    }
+                    track.invalidate()
+                }
+                addListener(object : android.animation.AnimatorListenerAdapter() {
+                    private var wasCancelled = false
+
+                    override fun onAnimationCancel(animation: android.animation.Animator) {
+                        wasCancelled = true
+                    }
+
+                    override fun onAnimationEnd(animation: android.animation.Animator) {
+                        track.background = null
+                        inactiveIcon?.let(track.overlay::remove)
+                        if (modeSelectionInactiveIcon === inactiveIcon) {
+                            modeSelectionInactiveIcon = null
+                        }
+                        selected.clipBounds = null
+                        if (animatePillWidth) {
+                            pillParams.width = ViewGroup.LayoutParams.WRAP_CONTENT
+                            pill.layoutParams = pillParams
+                        }
+                        if (modeSelectionIndicator === indicator) {
+                            modeSelectionIndicator = null
+                        }
+                        if (modeSelectionRevealTarget === selected) {
+                            modeSelectionRevealTarget = null
+                        }
+                        if (!wasCancelled) {
+                            selected.backgroundTintList = ColorStateList.valueOf(getPrimaryColor())
+                        }
+                    }
+                })
+                start()
+            }
+        }
+    }
+
+    /**
+     * Hides the controls that would compete with the capture/review state and
+     * grows the capture pill into the space vacated by the film dial. Keeping
+     * the width animation explicit avoids ConstraintLayout snapping the button
+     * to its final size when the dial is set to GONE.
+     */
+    private fun setCaptureControlsHiddenForReview(hidden: Boolean, animate: Boolean = true) {
+        val binding = _fragmentCameraBinding ?: return
+        if (captureControlsHidden == hidden) return
+
+        val captureButton = binding.captureButton
+        val captureParams = captureButton.layoutParams as?
+            androidx.constraintlayout.widget.ConstraintLayout.LayoutParams ?: return
+        val filmContainer = binding.filmModeContainer ?: return
+        val filmParams = filmContainer.layoutParams as?
+            androidx.constraintlayout.widget.ConstraintLayout.LayoutParams ?: return
+        val rootWidth = binding.root.width
+        if (rootWidth <= 0) return
+
+        captureControlsAnimator?.cancel()
+
+        val controls = if (hidden) {
+            listOfNotNull<View>(
+                binding.lensSelectorCard,
+                binding.settingsToggle,
+                filmContainer,
+            ).filter { it.visibility == View.VISIBLE }.also { captureControlsToRestore = it }
+        } else {
+            captureControlsToRestore
+        }
+
+        if (hidden && isSettingsMode) {
+            isSettingsMode = false
+            binding.settingsPanel?.animate()?.cancel()
+            binding.settingsPanel?.visibility = View.GONE
+            binding.settingsDimOverlay?.animate()?.cancel()
+            binding.settingsDimOverlay?.visibility = View.GONE
+            isAnimatingSettings = false
+        }
+
+        captureControlsHidden = hidden
+        val startWidth = captureButton.width.takeIf { it > 0 } ?: captureParams.width
+        val fullFilmWidth = 104.dpToPx()
+        val fullFilmHeight = 104.dpToPx()
+        val startFilmWidth = if (hidden) {
+            filmContainer.width.takeIf { it > 0 } ?: fullFilmWidth
+        } else {
+            0
+        }
+        val targetFilmWidth = if (hidden) 0 else fullFilmWidth
+        val filmStartMargin = filmParams.marginStart
+        val compactCaptureMargin = 8.dpToPx()
+        val fullCaptureMargin = 32.dpToPx()
+
+        if (!hidden) {
+            controls.forEach { control ->
+                control.animate().cancel()
+                control.visibility = View.VISIBLE
+                control.alpha = 0f
+                if (control !== filmContainer) {
+                    control.scaleX = 0.84f
+                    control.scaleY = 0.84f
+                }
+            }
+            filmContainer.scaleX = 1f
+            filmContainer.scaleY = 1f
+            filmParams.width = 0
+            filmParams.height = fullFilmHeight
+            filmContainer.translationX = 0f
+            filmContainer.layoutParams = filmParams
+        }
+
+        // Animate from the fixed right edge. This is the same spatial model as
+        // expanding the film dial: one control gives up width while the other
+        // receives exactly that width, instead of merely fading over it.
+        captureParams.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
+        captureParams.startToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
+        captureParams.endToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+        captureParams.width = startWidth.coerceAtLeast(0)
+        captureButton.layoutParams = captureParams
+
+        val targetWidth = if (hidden) {
+            rootWidth - fullCaptureMargin - captureParams.marginEnd
+        } else {
+            rootWidth - filmStartMargin - fullFilmWidth - compactCaptureMargin -
+                captureParams.marginEnd
+        }.coerceAtLeast(0)
+
+        fun applyFraction(fraction: Float) {
+            captureParams.width = (startWidth + (targetWidth - startWidth) * fraction).toInt()
+            captureButton.layoutParams = captureParams
+
+            val filmWidth = (startFilmWidth + (targetFilmWidth - startFilmWidth) * fraction).toInt()
+            filmParams.width = filmWidth
+            filmParams.height = fullFilmHeight
+            filmContainer.layoutParams = filmParams
+            // The fixed-height frame keeps the dial's established geometry;
+            // its width is reclaimed by the capture button from the right.
+            filmContainer.translationX = 0f
+            filmContainer.alpha = if (hidden) 1f - fraction else fraction
+            filmContainer.scaleX = 1f
+            filmContainer.scaleY = 1f
+
+            controls.forEach { control ->
+                if (control === filmContainer) return@forEach
+                val controlFraction = if (hidden) 1f - fraction else fraction
+                control.alpha = controlFraction
+                control.scaleX = 0.84f + 0.16f * controlFraction
+                control.scaleY = 0.84f + 0.16f * controlFraction
+            }
+        }
+
+        fun finishTransition() {
+            if (hidden) {
+                controls.forEach { control ->
+                    control.visibility = View.GONE
+                    control.alpha = 1f
+                    control.scaleX = 1f
+                    control.scaleY = 1f
+                }
+                filmParams.width = 0
+                filmParams.height = fullFilmHeight
+                filmContainer.translationX = 0f
+                filmContainer.scaleX = 1f
+                filmContainer.scaleY = 1f
+                filmContainer.layoutParams = filmParams
+                captureParams.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.PARENT_ID
+                captureParams.startToEnd = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
+                captureParams.marginStart = fullCaptureMargin
+            } else {
+                filmParams.width = fullFilmWidth
+                filmParams.height = fullFilmHeight
+                filmContainer.translationX = 0f
+                filmContainer.alpha = 1f
+                filmContainer.scaleX = 1f
+                filmContainer.scaleY = 1f
+                filmContainer.layoutParams = filmParams
+                captureParams.startToStart = androidx.constraintlayout.widget.ConstraintLayout.LayoutParams.UNSET
+                captureParams.startToEnd = R.id.film_mode_container
+                captureParams.marginStart = compactCaptureMargin
+                captureControlsToRestore = emptyList()
+            }
+            captureParams.width = 0
+            captureButton.layoutParams = captureParams
+        }
+
+        if (!animate) {
+            applyFraction(1f)
+            finishTransition()
+            return
+        }
+
+        captureControlsAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            var wasCancelled = false
+            duration = 320L
+            interpolator = android.view.animation.DecelerateInterpolator()
+            addUpdateListener { animator -> applyFraction(animator.animatedValue as Float) }
+            addListener(object : android.animation.AnimatorListenerAdapter() {
+                override fun onAnimationCancel(animation: android.animation.Animator) {
+                    wasCancelled = true
+                }
+
+                override fun onAnimationEnd(animation: android.animation.Animator) {
+                    if (!wasCancelled) finishTransition()
+                }
+            })
+            start()
+        }
+    }
+
     /** Configures the same rotary selector for the currently active capture mode. */
     private fun configureInlineFilmModeDial(dial: FilmModeDialView) {
         val names: List<String>
@@ -1173,6 +1560,21 @@ class CameraFragment : Fragment() {
 
     private fun toggleCameraVideoMode(toVideoMode: Boolean) {
         if (isRecordingVideo) return
+        val tappedModeButton = if (toVideoMode) {
+            _fragmentCameraBinding?.videoToggle
+        } else {
+            _fragmentCameraBinding?.cameraToggle
+        }
+        val modePillStartBounds = modeSegmentBounds(
+            if (isVideoMode) _fragmentCameraBinding?.videoToggle else _fragmentCameraBinding?.cameraToggle,
+            _fragmentCameraBinding?.modeSelectionSegmentTrack,
+        )
+        val modePillStartWidth = _fragmentCameraBinding?.modeSelectionPill?.width ?: 0
+        val tappedModeBounds = modeSegmentBounds(
+            tappedModeButton,
+            _fragmentCameraBinding?.modeSelectionSegmentTrack,
+        )
+        val tappedIcon = snapshotModeIcon(tappedModeButton)
         isVideoMode = toVideoMode
         if (isVideoMode) {
             savedPhotoFilmSimulation = filmSimulation
@@ -1188,6 +1590,13 @@ class CameraFragment : Fragment() {
             aspectRatio = photoAspectRatio
         }
         updateSettingsUI()
+        animateModeSelectionPill(
+            modePillStartBounds,
+            modePillStartWidth,
+            tappedModeBounds,
+            tappedIcon,
+            toVideoMode,
+        )
         updateCaptureButtonForState()
         saveSettings()
         if (!isShowingDone) {
@@ -1874,8 +2283,19 @@ class CameraFragment : Fragment() {
         }
     }
 
-    private fun updateViewfinderRatio() {
+    /**
+     * Sizes the viewfinder container for the live camera ratio, or for an
+     * explicitly supplied display-oriented review size. The latter is needed
+     * for recorded clips: their encoded frame can be landscape while rotation
+     * metadata makes the displayed clip portrait (or vice versa).
+     */
+    private fun updateViewfinderRatio(
+        displayWidth: Int? = null,
+        displayHeight: Int? = null,
+    ) {
         try {
+            val hasReviewSize = displayWidth != null && displayHeight != null &&
+                displayWidth > 0 && displayHeight > 0
             val sensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 0
             val needsSwap = (sensorOrientation == 90 || sensorOrientation == 270)
             // The container is sized purely from the SELECTED aspect ratio,
@@ -1886,7 +2306,9 @@ class CameraFragment : Fragment() {
             // center-crops any small mismatch between the camera buffer and
             // this container, so the image is never stretched — at most
             // minimally cropped.
-            val (targetW, targetH) = when (aspectRatio) {
+            val (targetW, targetH) = if (hasReviewSize) {
+                Pair(displayWidth!!, displayHeight!!)
+            } else when (aspectRatio) {
                 AspectRatio.RATIO_1_1 -> Pair(1, 1)
                 AspectRatio.RATIO_16_9 -> if (needsSwap) Pair(9, 16) else Pair(16, 9)
                 AspectRatio.RATIO_4_3 -> if (needsSwap) Pair(3, 4) else Pair(4, 3)
@@ -1924,6 +2346,51 @@ class CameraFragment : Fragment() {
             constraintSet.applyTo(fragmentCameraBinding.root as androidx.constraintlayout.widget.ConstraintLayout)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to update viewfinder ratio constraints", e)
+        }
+    }
+
+    /** Applies the clip's encoded dimensions plus its rotation metadata to the review layout. */
+    private fun updateViewfinderRatioForVideoReview() {
+        val context = context?.applicationContext ?: return
+        val uri = videoUri
+        val file = currentVideoFile
+        if (uri == null && file == null) return
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            val displaySize = withContext(Dispatchers.IO) {
+                val retriever = android.media.MediaMetadataRetriever()
+                try {
+                    if (uri != null) {
+                        retriever.setDataSource(context, uri)
+                    } else {
+                        retriever.setDataSource(file!!.absolutePath)
+                    }
+                    var width = retriever.extractMetadata(
+                        android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH,
+                    )?.toIntOrNull() ?: return@withContext null
+                    var height = retriever.extractMetadata(
+                        android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT,
+                    )?.toIntOrNull() ?: return@withContext null
+                    val rotation = retriever.extractMetadata(
+                        android.media.MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION,
+                    )?.toIntOrNull() ?: 0
+                    if (rotation == 90 || rotation == 270) {
+                        val swapped = width
+                        width = height
+                        height = swapped
+                    }
+                    Pair(width, height)
+                } catch (exc: Exception) {
+                    Log.w(TAG, "Unable to read recorded-video dimensions", exc)
+                    null
+                } finally {
+                    retriever.release()
+                }
+            }
+
+            if (isShowingDone && isVideoMode && displaySize != null) {
+                updateViewfinderRatio(displaySize.first, displaySize.second)
+            }
         }
     }
 
@@ -2012,8 +2479,9 @@ class CameraFragment : Fragment() {
         val overlay = binding.captureProgressOverlay ?: return
         val thumbnail = binding.captureProgressThumbnail ?: return
 
-        // Hide lens selector card during progress/review
-        binding.lensSelectorCard?.visibility = View.GONE
+        // The review state has one clear primary action. Fade the secondary
+        // controls away while the capture button expands into the bottom bar.
+        setCaptureControlsHiddenForReview(true)
 
         when (state) {
             is CaptureProgress.Saving -> {
@@ -2046,11 +2514,9 @@ class CameraFragment : Fragment() {
                 val oldBitmap = doneThumbnail
                 doneThumbnail = state.thumbnail
                 if (state.thumbnail != null) {
-                    // The container's ratio is deliberately NOT changed here:
-                    // it stays exactly where the live preview was, and the
-                    // result is shown fitCenter inside it. (Mutating the
-                    // container to the thumbnail ratio made the whole layout
-                    // jump on every capture.)
+                    // Still photos remain fitCenter in the live viewfinder.
+                    // Recorded video is handled below from its own display
+                    // dimensions, including orientation metadata.
                     thumbnail.setImageBitmap(state.thumbnail)
                     thumbnail.visibility = View.VISIBLE
                 } else {
@@ -2074,13 +2540,14 @@ class CameraFragment : Fragment() {
                     Log.w(TAG, "stopRepeating for review failed: ${exc.message}")
                 }
 
+                isShowingDone = true
                 if (isVideoMode) {
+                    updateViewfinderRatioForVideoReview()
                     setupVideoReviewPlayback(binding)
                 } else {
                     binding.captureProgressPlayButton?.visibility = View.GONE
                 }
 
-                isShowingDone = true
                 updateCaptureButtonForState()
                 updateSettingsUI()
             }
@@ -2100,10 +2567,7 @@ class CameraFragment : Fragment() {
         val overlay = binding.captureProgressOverlay ?: return
         val thumbnail = binding.captureProgressThumbnail ?: return
  
-        // Restore lens selector card visibility if camera entries exist
-        if (allCameraIds.isNotEmpty()) {
-            binding.lensSelectorCard?.visibility = View.VISIBLE
-        }
+        setCaptureControlsHiddenForReview(false)
  
         overlay.animate().cancel()
         overlay.visibility = View.GONE
@@ -2135,6 +2599,9 @@ class CameraFragment : Fragment() {
         frozenThumbnail?.takeIf { !it.isRecycled }?.recycle()
         frozenThumbnail = null
         isShowingDone = false
+        // The review may have used the recorded video's orientation; restore
+        // the selected live-camera ratio before resuming the preview stream.
+        updateViewfinderRatio()
         updateCaptureButtonForState()
         updateSettingsUI()
 
@@ -3126,13 +3593,22 @@ class CameraFragment : Fragment() {
                 lifecycleScope.launch(cont.context) {
                     while (true) {
 
-                        // Dequeue images until the timestamp matches the capture we're
-                        // waiting for. (We only ever request RAW_SENSOR or JPEG, so the
-                        // DEPTH_JPEG special case from the upstream sample isn't needed.)
+                        // The reader was drained before this still capture, so this is
+                        // normally the one image belonging to the request. Some back
+                        // camera HALs nevertheless report a slightly different image
+                        // timestamp from SENSOR_TIMESTAMP. Do not discard that image:
+                        // doing so leaves the queue empty, hits the timeout, and makes
+                        // the UI immediately fall back to live preview after Developing.
                         val image = imageQueue.take()
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
                             image.timestamp != resultTimestamp
-                        ) continue
+                        ) {
+                            Log.w(
+                                TAG,
+                                "Capture/image timestamp mismatch; accepting the drained-reader image " +
+                                    "(capture=$resultTimestamp, image=${image.timestamp})",
+                            )
+                        }
                         Log.d(TAG, "Matching image dequeued: ${image.timestamp}")
 
                         // Unset the image reader listener
@@ -3509,6 +3985,11 @@ class CameraFragment : Fragment() {
         filmModeDialAnimator?.cancel()
         filmModeDialAnimator = null
         isFilmModeDialExpanded = false
+        captureControlsAnimator?.cancel()
+        captureControlsAnimator = null
+        captureControlsHidden = false
+        captureControlsToRestore = emptyList()
+        clearModeSelectionAnimation()
         developProgressAnimator?.cancel()
         developProgressAnimator = null
         isDevelopProgressVisible = false

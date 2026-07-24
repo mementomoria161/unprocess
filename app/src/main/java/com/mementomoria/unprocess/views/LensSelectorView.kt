@@ -58,11 +58,17 @@ class LensSelectorView @JvmOverloads constructor(
     private var isPointerHovering = false
     private var downX = 0f
     private var startSelectionPosition = 0f
+    private var startSelectedIndex = 0
+    private var wasExpandedAtDown = false
+    private var isDragging = false
     private var expandAnimator: ValueAnimator? = null
     private var settleAnimator: ValueAnimator? = null
 
     private val collapseRunnable = Runnable {
         if (!isTracking && !isPointerHovering) setExpanded(false)
+    }
+    private val expandOnHoldRunnable = Runnable {
+        if (isTracking && !isDragging) setExpanded(true)
     }
 
     init {
@@ -153,9 +159,14 @@ class LensSelectorView @JvmOverloads constructor(
                 }
                 removeCallbacks(collapseRunnable)
                 isTracking = true
+                isDragging = false
+                wasExpandedAtDown = isExpanded
                 downX = event.rawX
                 startSelectionPosition = selectionPosition
-                setExpanded(true)
+                startSelectedIndex = selectedIndex
+                if (!wasExpandedAtDown) {
+                    postDelayed(expandOnHoldRunnable, android.view.ViewConfiguration.getLongPressTimeout().toLong())
+                }
                 parent?.requestDisallowInterceptTouchEvent(true)
                 return true
             }
@@ -163,24 +174,45 @@ class LensSelectorView @JvmOverloads constructor(
             MotionEvent.ACTION_MOVE -> {
                 val delta = event.rawX - downX
                 if (abs(delta) >= touchSlop) {
+                    isDragging = true
+                    removeCallbacks(expandOnHoldRunnable)
+                    setExpanded(true)
                     updateSelectionPosition(startSelectionPosition - delta / itemSpacing)
                 }
                 return true
             }
 
             MotionEvent.ACTION_UP -> {
+                removeCallbacks(expandOnHoldRunnable)
                 val wasTap = abs(event.rawX - downX) < touchSlop
                 if (wasTap) performClick()
                 isTracking = false
                 parent?.requestDisallowInterceptTouchEvent(false)
-                settleOnSelectedLens()
+                if (wasTap && !wasExpandedAtDown && !isExpanded) {
+                    cycleToNextLens()
+                } else {
+                    settleOnSelectedLens()
+                    // Dragging only previews a lens in the selector. Opening
+                    // or reconfiguring the actual camera is intentionally
+                    // deferred until the finger is released, avoiding a
+                    // costly switch for every detent crossed during one
+                    // gesture.
+                    if (selectedIndex != startSelectedIndex) {
+                        onLensSelected?.invoke(selectedIndex)
+                    }
+                }
                 postDelayed(collapseRunnable, 160L)
                 return true
             }
 
             MotionEvent.ACTION_CANCEL -> {
+                removeCallbacks(expandOnHoldRunnable)
                 isTracking = false
                 parent?.requestDisallowInterceptTouchEvent(false)
+                selectedIndex = startSelectedIndex
+                selectionPosition = startSelectedIndex.toFloat()
+                updateContentDescription()
+                invalidate()
                 settleOnSelectedLens()
                 postDelayed(collapseRunnable, 160L)
                 return true
@@ -216,6 +248,7 @@ class LensSelectorView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         removeCallbacks(collapseRunnable)
+        removeCallbacks(expandOnHoldRunnable)
         expandAnimator?.cancel()
         settleAnimator?.cancel()
         super.onDetachedFromWindow()
@@ -247,9 +280,20 @@ class LensSelectorView @JvmOverloads constructor(
             selectedIndex = nextIndex
             updateContentDescription()
             performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            onLensSelected?.invoke(nextIndex)
         }
         invalidate()
+    }
+
+    /** Advances the compact selector one lens and wraps after the final entry. */
+    private fun cycleToNextLens() {
+        if (lensLabels.isEmpty()) return
+        settleAnimator?.cancel()
+        selectedIndex = (selectedIndex + 1) % lensLabels.size
+        selectionPosition = selectedIndex.toFloat()
+        updateContentDescription()
+        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+        invalidate()
+        onLensSelected?.invoke(selectedIndex)
     }
 
     private fun settleOnSelectedLens() {

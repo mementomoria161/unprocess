@@ -110,8 +110,12 @@ class FilmModeDialView @JvmOverloads constructor(
         val desired = 336.dp.roundToInt()
         val width = resolveSize(desired, widthMeasureSpec)
         val height = resolveSize(desired, heightMeasureSpec)
-        val size = min(width, height)
-        setMeasuredDimension(size, size)
+        // The normal and expanded dial layouts are square. During the capture
+        // transition, however, its parent intentionally gives up only width
+        // to the growing capture button. Preserve that height so the dial
+        // remains vertically centred instead of shrinking toward its top-left
+        // corner as the available width decreases.
+        setMeasuredDimension(width, height)
     }
 
     override fun onDraw(canvas: Canvas) {

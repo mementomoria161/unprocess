@@ -220,6 +220,7 @@
         android:id="@+id/capture_button"
         android:layout_width="0dp"
         android:layout_height="104dp"
+        android:layout_marginBottom="48dp"
         android:layout_marginEnd="32dp"
         android:layout_marginStart="8dp"
         android:contentDescription="@string/capture"
@@ -232,7 +233,7 @@
         app:iconGravity="textStart"
         app:iconPadding="0dp"
         app:iconSize="28dp"
-        app:layout_constraintBottom_toBottomOf="@+id/film_mode_container"
+        app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toEndOf="@+id/film_mode_container" />
 
@@ -416,6 +417,7 @@
             app:cardUseCompatPadding="false">
 
             <LinearLayout
+                android:id="@+id/mode_selection_segment_track"
                 android:layout_width="wrap_content"
                 android:layout_height="match_parent"
                 android:orientation="horizontal">
